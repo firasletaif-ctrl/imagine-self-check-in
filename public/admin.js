@@ -49,7 +49,7 @@ $('#login-form').addEventListener('submit',async e=>{
   setBusy(button,true);
   try{
     const data=await api('/api/admin/login',{method:'POST',body:JSON.stringify({username,password})});
-    $('#password').value='';e.currentTarget.reset();showSettings(data.username);showToast('Connexion administrateur réussie.');
+    $('#login-form').reset();showSettings(data.username);showToast('Connexion administrateur réussie.');
   }catch(error){showError('#login-error',error.message);}
   finally{setBusy(button,false);}
 });
