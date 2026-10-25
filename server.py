@@ -150,14 +150,14 @@ def utc_now() -> str:
 
 def message_defaults() -> dict:
     return {
-        "newPaidMessage": "Votre inscription est enregistrée. Veuillez vous diriger vers la gauche/droite pour la suite.",
+        "newPaidMessage": "Votre inscription et votre arrivée sont enregistrées. Le règlement reste à confirmer. Veuillez vous diriger vers la gauche/droite; il n’est pas nécessaire de revenir à la borne.",
         "newFreeMessage": "Votre inscription et votre arrivée sont confirmées. Bienvenue !",
         "arrivedPaidMessage": "Votre arrivée est confirmée. Bienvenue à l’événement !",
-        "arrivedUnpaidMessage": "Votre arrivée est enregistrée. Veuillez suivre les indications de l’équipe d’accueil.",
-        "paymentRequiredMessage": "Votre inscription est trouvée, mais le règlement n’est pas confirmé. Veuillez vous diriger vers la gauche/droite.",
+        "arrivedUnpaidMessage": "Votre arrivée est confirmée. Si un règlement est requis, il reste à confirmer : veuillez vous diriger vers la gauche/droite.",
+        "paymentRequiredMessage": "Votre inscription est trouvée, mais le règlement n’est pas confirmé. Confirmez votre arrivée ci-dessous, puis dirigez-vous vers la gauche/droite; vous n’aurez pas à revenir à la borne.",
         "arrivedExemptMessage": "Votre arrivée est confirmée. Bienvenue à l’événement !",
         "alreadyPaidMessage": "Votre arrivée était déjà confirmée et votre paiement est enregistré. Bienvenue !",
-        "alreadyUnpaidMessage": "Votre arrivée était déjà confirmée. Veuillez vous diriger vers la gauche/droite pour la suite.",
+        "alreadyUnpaidMessage": "Votre arrivée est déjà enregistrée. Si le règlement reste à confirmer, veuillez vous diriger vers la gauche/droite; aucun retour à la borne n’est nécessaire.",
         "alreadyExemptMessage": "Votre arrivée était déjà confirmée. Bienvenue !",
         "capacityMessage": "Les inscriptions sur place sont complètes. Adressez-vous à l’équipe d’accueil.",
         "registrationClosedMessage": "Les inscriptions sur place sont fermées. Adressez-vous à l’équipe d’accueil.",
@@ -986,11 +986,12 @@ class Handler(BaseHTTPRequestHandler):
                 settings = kiosk_settings()
                 payment_status = person.get("paymentStatus") or "unpaid"
                 already_key = {"paid": "alreadyPaidMessage", "exempt": "alreadyExemptMessage"}.get(payment_status, "alreadyUnpaidMessage")
+                requires_payment = bool(settings["paymentRequired"] and payment_status not in ("paid", "exempt"))
                 self.json_response(200, {"lookupToken": token, "name": clean(person.get("name"), 180),
                                          "checkedIn": bool(person.get("checkedIn")), "code": clean(person.get("code"), 40),
-                                         "paymentStatus": payment_status,
-                                         "requiresPayment": bool(settings["paymentRequired"] and payment_status not in ("paid", "exempt")),
-                                         "message": (settings["paymentRequiredMessage"] if settings["paymentRequired"] and payment_status not in ("paid", "exempt") else
+                                         "paymentStatus": payment_status, "requiresPayment": requires_payment,
+                                         "message": (settings["alreadyUnpaidMessage"] if requires_payment and person.get("checkedIn") else
+                                                     settings["paymentRequiredMessage"] if requires_payment else
                                                      settings[already_key] if person.get("checkedIn") else "")})
                 return
             if self.path == "/api/checkin":
@@ -1007,9 +1008,6 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 settings = kiosk_settings()
                 payment_status = person.get("paymentStatus") or "unpaid"
-                if settings["paymentRequired"] and payment_status not in ("paid", "exempt"):
-                    self.json_response(409, {"error": settings["paymentRequiredMessage"]})
-                    return
                 if person.get("checkedIn"):
                     message_key = {"paid": "alreadyPaidMessage", "exempt": "alreadyExemptMessage"}.get(payment_status, "alreadyUnpaidMessage")
                     self.json_response(200, {"ok": True, "already": True, "name": clean(person.get("name"), 180), "message": settings[message_key]})
@@ -1050,7 +1048,7 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     payment_status = "unpaid" if settings["paymentRequired"] else "exempt"
                     data = client.call(participants_path, "POST", {"name": name, "email": email, "company": company,
-                                                                    "category": "participant", "checkedIn": not settings["paymentRequired"],
+                                                                    "category": "participant", "checkedIn": True,
                                                                     "paymentStatus": payment_status})
                 person = data.get("participant") or {}
                 success_message = settings["newPaidMessage"] if settings["paymentRequired"] else settings["newFreeMessage"]

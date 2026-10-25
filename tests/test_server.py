@@ -142,33 +142,40 @@ class KioskApiTests(unittest.TestCase):
             self.assertEqual(data["paymentStatus"], "unpaid")
             self.assertEqual(data["message"], "Dirigez-vous à droite.")
             self.assertEqual(self.desk.people[-1]["paymentStatus"], "unpaid")
-        self.assertFalse(self.desk.people[-1]["checkedIn"])
+        self.assertTrue(self.desk.people[-1]["checkedIn"])
         server.KIOSK_CONFIG_PATH = old_path
 
-    def test_unpaid_attendee_cannot_check_in_until_agent_confirms_payment(self):
+    def test_unpaid_attendee_can_record_arrival_before_agent_confirms_payment(self):
         old_path = server.KIOSK_CONFIG_PATH
         with tempfile.TemporaryDirectory() as tempdir:
             server.KIOSK_CONFIG_PATH = Path(tempdir) / "settings.json"
             server.save_kiosk_settings({"eventId": "event-1", "paymentRequired": True,
-                                       "paymentRequiredMessage": "Merci de vous diriger à gauche."})
+                                       "paymentRequiredMessage": "Confirmez votre arrivée puis allez régler.",
+                                       "alreadyUnpaidMessage": "Arrivée déjà enregistrée; règlement à confirmer."})
             status, lookup = self.post("/api/lookup", {"query": "amira@example.tn"})
             self.assertEqual(status, 200)
             self.assertTrue(lookup["requiresPayment"])
-            self.assertEqual(lookup["message"], "Merci de vous diriger à gauche.")
-            status, blocked = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
-            self.assertEqual(status, 409)
-            self.assertEqual(blocked["error"], "Merci de vous diriger à gauche.")
-            self.assertFalse(self.desk.people[0]["checkedIn"])
+            self.assertFalse(lookup["checkedIn"])
+            self.assertEqual(lookup["message"], "Confirmez votre arrivée puis allez régler.")
+            status, checked = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
+            self.assertEqual(status, 200)
+            self.assertFalse(checked["already"])
+            self.assertEqual(checked["message"], server.kiosk_settings()["arrivedUnpaidMessage"])
+            self.assertTrue(self.desk.people[0]["checkedIn"])
+            self.assertNotEqual(self.desk.people[0].get("paymentStatus", "unpaid"), "paid")
 
-            # Simulate an agent confirming payment in Imagine Desk.
+            status, lookup = self.post("/api/lookup", {"query": "amira@example.tn"})
+            self.assertEqual(status, 200)
+            self.assertTrue(lookup["requiresPayment"])
+            self.assertTrue(lookup["checkedIn"])
+            self.assertEqual(lookup["message"], "Arrivée déjà enregistrée; règlement à confirmer.")
+
+            # Simulate the agent confirming payment in Imagine Desk; arrival remains recorded.
             self.desk.people[0]["paymentStatus"] = "paid"
             status, lookup = self.post("/api/lookup", {"query": "amira@example.tn"})
             self.assertEqual(status, 200)
             self.assertFalse(lookup["requiresPayment"])
-            status, checked = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
-            self.assertEqual(status, 200)
-            self.assertFalse(checked["already"])
-            self.assertTrue(self.desk.people[0]["checkedIn"])
+            self.assertTrue(lookup["checkedIn"])
         server.KIOSK_CONFIG_PATH = old_path
 
     def test_capacity_blocks_new_signup_with_admin_message(self):
