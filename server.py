@@ -10,12 +10,16 @@ import http.cookiejar
 import json
 import os
 import secrets
+import re
+import smtplib
+import ssl
 from http.cookies import SimpleCookie
 import threading
 import time
 import uuid
 from collections import defaultdict, deque
-from datetime import date
+from datetime import date, datetime, timezone
+from email.message import EmailMessage
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -32,9 +36,18 @@ DESK_PASSWORD = os.getenv("IMAGINE_DESK_PASSWORD", "")
 EVENT_ID = os.getenv("IMAGINE_DESK_EVENT_ID", "").strip()
 KIOSK_CONFIG_PATH = Path(os.getenv("IMAGINE_KIOSK_CONFIG_PATH", ROOT / "data" / "kiosk_settings.json"))
 SETTINGS_DATABASE_URL = os.getenv("SELF_CHECKIN_DATABASE_URL", "").strip()
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+try:
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
+except ValueError:
+    SMTP_PORT = 587
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
+SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1").strip().lower() not in {"0", "false", "no"}
 settings_schema_ready = False
 ADMIN_SESSION_TTL = 8 * 60 * 60
-MAX_BODY = 16_000
+MAX_BODY = 32_000
 RATE_LIMIT = 20
 RATE_WINDOW = 60
 
@@ -125,6 +138,42 @@ def settings_database_connect():
     return psycopg.connect(SETTINGS_DATABASE_URL, connect_timeout=8)
 
 
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def message_defaults() -> dict:
+    return {
+        "newPaidMessage": "Votre inscription est enregistrée. Veuillez vous diriger vers la gauche/droite pour la suite.",
+        "newFreeMessage": "Votre inscription et votre arrivée sont confirmées. Bienvenue !",
+        "arrivedPaidMessage": "Votre arrivée est confirmée. Bienvenue à l’événement !",
+        "arrivedUnpaidMessage": "Votre arrivée est enregistrée. Veuillez suivre les indications de l’équipe d’accueil.",
+        "paymentRequiredMessage": "Votre inscription est trouvée, mais le règlement n’est pas confirmé. Veuillez vous diriger vers la gauche/droite.",
+        "arrivedExemptMessage": "Votre arrivée est confirmée. Bienvenue à l’événement !",
+        "alreadyPaidMessage": "Votre arrivée était déjà confirmée et votre paiement est enregistré. Bienvenue !",
+        "alreadyUnpaidMessage": "Votre arrivée était déjà confirmée. Veuillez vous diriger vers la gauche/droite pour la suite.",
+        "alreadyExemptMessage": "Votre arrivée était déjà confirmée. Bienvenue !",
+        "capacityMessage": "Les inscriptions sur place sont complètes. Adressez-vous à l’équipe d’accueil.",
+        "registrationClosedMessage": "Les inscriptions sur place sont fermées. Adressez-vous à l’équipe d’accueil.",
+        "notFoundMessage": "Inscription introuvable. Vérifiez votre e-mail ou votre code, ou demandez de l’aide à l’accueil.",
+        "duplicateEmailMessage": "Cette adresse e-mail est déjà inscrite. Choisissez le parcours « Déjà inscrit·e » pour confirmer votre arrivée.",
+    }
+
+
+def default_settings() -> dict:
+    return {
+        "eventId": EVENT_ID,
+        "registrationsEnabled": True,
+        "paymentRequired": False,
+        "maxParticipants": 0,
+        **message_defaults(),
+        "paymentEmailEnabled": False,
+        "paymentEmailEnabledAt": "",
+        "paymentEmailSubject": "Confirmation de paiement — {{event_name}}",
+        "paymentEmailBody": "Bonjour {{name}},\n\nNous confirmons la réception de votre paiement de {{price}} pour {{event_name}}.\nTarif : {{tariff}}\nIdentifiant d’inscription : {{participant_id}}\nCode participant : {{code}}\n\nÀ bientôt !",
+    }
+
+
 def ensure_settings_schema() -> None:
     global settings_schema_ready
     if not SETTINGS_DATABASE_URL or settings_schema_ready:
@@ -138,7 +187,19 @@ def ensure_settings_schema() -> None:
                     id SMALLINT PRIMARY KEY CHECK (id = 1),
                     event_id TEXT NOT NULL DEFAULT '',
                     registrations_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    settings_json TEXT NOT NULL DEFAULT '{}'
+                )""")
+                connection.execute("ALTER TABLE self_checkin_settings ADD COLUMN IF NOT EXISTS settings_json TEXT NOT NULL DEFAULT '{}' ")
+                connection.execute("""CREATE TABLE IF NOT EXISTS self_checkin_payment_emails (
+                    event_id TEXT NOT NULL,
+                    participant_id TEXT NOT NULL,
+                    payment_confirmed_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    sent_at TIMESTAMPTZ,
+                    last_error TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(event_id, participant_id, payment_confirmed_at)
                 )""")
             settings_schema_ready = True
         except Exception as exc:
@@ -146,14 +207,24 @@ def ensure_settings_schema() -> None:
 
 
 def kiosk_settings() -> dict:
-    defaults = {"eventId": EVENT_ID, "registrationsEnabled": True}
+    defaults = default_settings()
     if SETTINGS_DATABASE_URL:
         ensure_settings_schema()
         try:
             with settings_database_connect() as connection:
-                row = connection.execute("SELECT event_id, registrations_enabled FROM self_checkin_settings WHERE id=1").fetchone()
+                row = connection.execute("SELECT event_id, registrations_enabled, settings_json FROM self_checkin_settings WHERE id=1").fetchone()
             if row:
-                defaults.update({"eventId": row[0], "registrationsEnabled": row[1]})
+                defaults["eventId"] = row[0]
+                defaults["registrationsEnabled"] = row[1]
+                try:
+                    saved = json.loads(row[2] or "{}")
+                    if isinstance(saved, dict):
+                        defaults.update(saved)
+                except (TypeError, ValueError):
+                    pass
+                # The canonical columns always win over the JSON copy.
+                defaults["eventId"] = row[0]
+                defaults["registrationsEnabled"] = row[1]
         except Exception as exc:
             raise RuntimeError("Impossible de lire les réglages de la borne dans PostgreSQL.") from exc
     else:
@@ -161,11 +232,22 @@ def kiosk_settings() -> dict:
             try:
                 stored = json.loads(KIOSK_CONFIG_PATH.read_text(encoding="utf-8"))
                 if isinstance(stored, dict):
-                    defaults.update({k: stored[k] for k in ("eventId", "registrationsEnabled") if k in stored})
+                    defaults.update(stored)
             except (OSError, ValueError):
                 pass
     defaults["eventId"] = clean(defaults.get("eventId"), 100)
     defaults["registrationsEnabled"] = bool(defaults.get("registrationsEnabled", True))
+    defaults["paymentRequired"] = bool(defaults.get("paymentRequired", False))
+    defaults["paymentEmailEnabled"] = bool(defaults.get("paymentEmailEnabled", False))
+    try:
+        defaults["maxParticipants"] = max(0, min(100000, int(defaults.get("maxParticipants", 0))))
+    except (TypeError, ValueError):
+        defaults["maxParticipants"] = 0
+    for key, value in message_defaults().items():
+        defaults[key] = str(defaults.get(key, value) or value)[:1000]
+    defaults["paymentEmailSubject"] = str(defaults.get("paymentEmailSubject") or default_settings()["paymentEmailSubject"])[:200]
+    defaults["paymentEmailBody"] = str(defaults.get("paymentEmailBody") or default_settings()["paymentEmailBody"])[:8000]
+    defaults["paymentEmailEnabledAt"] = str(defaults.get("paymentEmailEnabledAt") or "")[:64]
     return defaults
 
 
@@ -173,18 +255,42 @@ def selected_event_id() -> str:
     return kiosk_settings().get("eventId") or EVENT_ID
 
 
+def clean_multiline(value, limit: int) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    return text.strip()[:limit]
+
+
+def sanitized_settings(settings: dict) -> dict:
+    safe = default_settings()
+    safe["eventId"] = clean(settings.get("eventId"), 100)
+    safe["registrationsEnabled"] = bool(settings.get("registrationsEnabled", True))
+    safe["paymentRequired"] = bool(settings.get("paymentRequired", False))
+    try:
+        safe["maxParticipants"] = max(0, min(100000, int(settings.get("maxParticipants", 0))))
+    except (TypeError, ValueError):
+        raise ValueError("La capacité doit être un nombre entier positif (0 = sans limite).")
+    for key in message_defaults():
+        safe[key] = clean_multiline(settings.get(key, safe[key]), 1000) or message_defaults()[key]
+    safe["paymentEmailEnabled"] = bool(settings.get("paymentEmailEnabled", False))
+    safe["paymentEmailEnabledAt"] = clean(settings.get("paymentEmailEnabledAt"), 64)
+    safe["paymentEmailSubject"] = clean_multiline(settings.get("paymentEmailSubject", safe["paymentEmailSubject"]), 200) or safe["paymentEmailSubject"]
+    safe["paymentEmailBody"] = clean_multiline(settings.get("paymentEmailBody", safe["paymentEmailBody"]), 8000) or safe["paymentEmailBody"]
+    return safe
+
+
 def save_kiosk_settings(settings: dict) -> None:
-    safe = {"eventId": clean(settings.get("eventId"), 100),
-            "registrationsEnabled": bool(settings.get("registrationsEnabled", True))}
+    safe = sanitized_settings(settings)
+    encoded = json.dumps(safe, ensure_ascii=False)
     if SETTINGS_DATABASE_URL:
         ensure_settings_schema()
         try:
             with settings_database_connect() as connection:
-                connection.execute("""INSERT INTO self_checkin_settings(id,event_id,registrations_enabled,updated_at)
-                    VALUES(1,%s,%s,CURRENT_TIMESTAMP)
+                connection.execute("""INSERT INTO self_checkin_settings(id,event_id,registrations_enabled,updated_at,settings_json)
+                    VALUES(1,%s,%s,CURRENT_TIMESTAMP,%s)
                     ON CONFLICT(id) DO UPDATE SET event_id=EXCLUDED.event_id,
-                    registrations_enabled=EXCLUDED.registrations_enabled,updated_at=CURRENT_TIMESTAMP""",
-                    (safe["eventId"], safe["registrationsEnabled"]))
+                    registrations_enabled=EXCLUDED.registrations_enabled,updated_at=CURRENT_TIMESTAMP,
+                    settings_json=EXCLUDED.settings_json""",
+                    (safe["eventId"], safe["registrationsEnabled"], encoded))
         except Exception as exc:
             raise RuntimeError("Impossible d’enregistrer les réglages dans PostgreSQL.") from exc
         return
@@ -193,6 +299,151 @@ def save_kiosk_settings(settings: dict) -> None:
         temp = KIOSK_CONFIG_PATH.with_suffix(KIOSK_CONFIG_PATH.suffix + ".tmp")
         temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp, KIOSK_CONFIG_PATH)
+
+
+def smtp_configured() -> bool:
+    return bool(SMTP_HOST and 1 <= SMTP_PORT <= 65535 and SMTP_FROM and (bool(SMTP_USERNAME) == bool(SMTP_PASSWORD)))
+
+
+def render_mail_template(template: str, values: dict) -> str:
+    return re.sub(r"{{\s*([a-zA-Z0-9_]+)\s*}}", lambda match: str(values.get(match.group(1), "")), str(template or ""))
+
+
+def email_variables(person: dict, event: dict) -> dict:
+    try:
+        amount = float(person.get("paymentAmount") or 0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    currency = clean(event.get("currency") or "TND", 8)
+    price = f"{amount:.3f}".rstrip("0").rstrip(".")
+    return {
+        "name": clean(person.get("name"), 180),
+        "price": f"{price} {currency}",
+        "amount": price,
+        "currency": currency,
+        "participant_id": clean(person.get("id"), 100),
+        "code": clean(person.get("code"), 40),
+        "email": clean(person.get("email"), 180),
+        "event_name": clean(event.get("name"), 180),
+        "event_date": clean(event.get("date"), 40),
+        "venue": clean(event.get("venue"), 180),
+        "tariff": clean(person.get("paymentTariff"), 180),
+        "payment_method": clean(person.get("paymentMethod"), 80),
+        "payment_reference": clean(person.get("paymentReference"), 120),
+    }
+
+
+def send_email(to_address: str, subject: str, body: str) -> None:
+    if not smtp_configured():
+        raise RuntimeError("Le serveur e-mail SMTP n’est pas configuré.")
+    message = EmailMessage()
+    message["From"] = SMTP_FROM
+    message["To"] = to_address
+    message["Subject"] = subject[:200]
+    message.set_content(body[:10000])
+    context = ssl.create_default_context()
+    try:
+        if SMTP_PORT == 465:
+            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context) as smtp:
+                if SMTP_USERNAME:
+                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+                smtp.send_message(message)
+            return
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
+            if SMTP_USE_TLS:
+                smtp.starttls(context=context)
+            if SMTP_USERNAME:
+                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
+            smtp.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise RuntimeError("Impossible d’envoyer l’e-mail. Vérifiez les paramètres SMTP et l’adresse de l’expéditeur.") from exc
+
+
+def payment_email_claim(event_id: str, person_id: str, confirmed_at: str) -> bool:
+    if not SETTINGS_DATABASE_URL:
+        return False
+    ensure_settings_schema()
+    with settings_database_connect() as connection:
+        cursor = connection.execute("""INSERT INTO self_checkin_payment_emails
+            (event_id,participant_id,payment_confirmed_at,status,attempted_at,last_error)
+            VALUES(%s,%s,%s,'sending',CURRENT_TIMESTAMP,'')
+            ON CONFLICT(event_id,participant_id,payment_confirmed_at) DO UPDATE SET
+            status='sending',attempted_at=CURRENT_TIMESTAMP,last_error=''
+            WHERE self_checkin_payment_emails.status='failed'
+               OR (self_checkin_payment_emails.status='sending'
+                   AND self_checkin_payment_emails.attempted_at < CURRENT_TIMESTAMP - INTERVAL '5 minutes')""",
+            (event_id, person_id, confirmed_at))
+        return cursor.rowcount == 1
+
+
+def finish_payment_email(event_id: str, person_id: str, confirmed_at: str, success: bool) -> None:
+    if not SETTINGS_DATABASE_URL:
+        return
+    try:
+        with settings_database_connect() as connection:
+            if success:
+                connection.execute("""UPDATE self_checkin_payment_emails SET status='sent',sent_at=CURRENT_TIMESTAMP,last_error=''
+                    WHERE event_id=%s AND participant_id=%s AND payment_confirmed_at=%s""", (event_id, person_id, confirmed_at))
+            else:
+                connection.execute("""UPDATE self_checkin_payment_emails SET status='failed',last_error='smtp_send_failed'
+                    WHERE event_id=%s AND participant_id=%s AND payment_confirmed_at=%s""", (event_id, person_id, confirmed_at))
+    except Exception:
+        pass
+
+
+def parse_timestamp(value: str) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return stamp.replace(tzinfo=timezone.utc) if stamp.tzinfo is None else stamp.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def payment_email_eligible(person: dict, settings: dict) -> bool:
+    if person.get("paymentStatus") != "paid" or not clean(person.get("email"), 180):
+        return False
+    enabled_at = parse_timestamp(settings.get("paymentEmailEnabledAt", ""))
+    confirmed_at = parse_timestamp(person.get("paymentConfirmedAt", ""))
+    return bool(settings.get("paymentEmailEnabled") and enabled_at and confirmed_at and confirmed_at >= enabled_at)
+
+
+def poll_payment_emails_once() -> None:
+    settings = kiosk_settings()
+    event_id = settings.get("eventId") or EVENT_ID
+    if not event_id or not settings.get("paymentEmailEnabled") or not smtp_configured() or not SETTINGS_DATABASE_URL:
+        return
+    if not parse_timestamp(settings.get("paymentEmailEnabledAt", "")):
+        return
+    event_data = client.call("/api/events")
+    event = next((item for item in event_data.get("events", []) if str(item.get("id")) == str(event_id)), None)
+    if not event or event.get("status") == "archived":
+        return
+    for person in participants(event_id):
+        confirmed_at = str(person.get("paymentConfirmedAt") or "")
+        email = clean(person.get("email"), 180)
+        if not payment_email_eligible(person, settings):
+            continue
+        person_id = str(person.get("id") or "")
+        if not person_id or not payment_email_claim(event_id, person_id, confirmed_at):
+            continue
+        variables = email_variables(person, event)
+        try:
+            send_email(email,
+                       render_mail_template(settings["paymentEmailSubject"], variables),
+                       render_mail_template(settings["paymentEmailBody"], variables))
+            finish_payment_email(event_id, person_id, confirmed_at, True)
+        except Exception:
+            finish_payment_email(event_id, person_id, confirmed_at, False)
+            print("Payment confirmation email failed (SMTP error).", flush=True)
+
+
+def payment_email_worker() -> None:
+    while True:
+        try:
+            poll_payment_emails_once()
+        except Exception:
+            print("Payment confirmation email polling failed.", flush=True)
+        time.sleep(30)
 
 
 def admin_client_for(handler):
@@ -223,21 +474,34 @@ def normalized(value) -> str:
     return clean(value, 240).casefold()
 
 
+def public_settings(settings: dict | None = None) -> dict:
+    settings = settings or kiosk_settings()
+    keys = ("registrationsEnabled", "paymentRequired", "maxParticipants", *message_defaults().keys())
+    return {key: settings[key] for key in keys}
+
+
 def event_info() -> dict:
+    settings = kiosk_settings()
     missing = required_config()
     event_id = selected_event_id()
     if not event_id:
         missing = missing + ["IMAGINE_DESK_EVENT_ID"]
     if missing:
-        return {"ready": False, "event": None, "missing": missing, "registrationsEnabled": kiosk_settings()["registrationsEnabled"]}
+        return {"ready": False, "event": None, "missing": missing, "settings": public_settings(settings), "registrationsEnabled": settings["registrationsEnabled"]}
     data = client.call("/api/events")
     event = next((item for item in data.get("events", []) if str(item.get("id")) == event_id), None)
     if not event:
-        return {"ready": False, "event": None, "missing": [], "message": "L’événement configuré est introuvable ou n’est pas accessible."}
+        return {"ready": False, "event": None, "missing": [], "message": "L’événement configuré est introuvable ou n’est pas accessible.", "settings": public_settings(settings)}
     if event.get("status") == "archived":
-        return {"ready": False, "event": None, "missing": [], "message": "Cet événement est archivé dans Imagine Desk."}
-    settings = kiosk_settings()
-    return {"ready": True, "event": {"id": event_id, "name": clean(event.get("name"), 120), "date": clean(event.get("date"), 30), "venue": clean(event.get("venue"), 120)}, "registrationsEnabled": settings["registrationsEnabled"]}
+        return {"ready": False, "event": None, "missing": [], "message": "Cet événement est archivé dans Imagine Desk.", "settings": public_settings(settings)}
+    return {
+        "ready": True,
+        "event": {"id": event_id, "name": clean(event.get("name"), 120), "date": clean(event.get("date"), 30),
+                  "venue": clean(event.get("venue"), 120), "currency": clean(event.get("currency") or "TND", 8),
+                  "total": int(event.get("total") or 0)},
+        "registrationsEnabled": settings["registrationsEnabled"],
+        "settings": public_settings(settings),
+    }
 
 
 def participants(event_id: str | None = None) -> list[dict]:
@@ -324,6 +588,29 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(401, {"authenticated": False})
             else:
                 self.json_response(200, {"authenticated": True, "username": clean(admin.user.get("username"), 80)})
+            return
+        if self.path == "/api/admin/settings":
+            admin = admin_client_for(self)
+            if not admin:
+                self.json_response(401, {"error": "Connectez-vous avec un compte administrateur Imagine Desk."})
+                return
+            try:
+                settings = kiosk_settings()
+                self.json_response(200, {"settings": settings, "smtpConfigured": smtp_configured()})
+            except RuntimeError as exc:
+                self.json_response(503, {"error": str(exc)})
+            return
+        price_match = re.fullmatch(r"/api/admin/events/([^/]+)/prices", self.path)
+        if price_match:
+            admin = admin_client_for(self)
+            if not admin:
+                self.json_response(401, {"error": "Connectez-vous avec un compte administrateur Imagine Desk."})
+                return
+            try:
+                data = admin.call(f"/api/events/{quote(price_match.group(1), safe='')}/prices")
+                self.json_response(200, {"prices": data.get("prices", [])})
+            except RuntimeError as exc:
+                self.json_response(502, {"error": str(exc)})
             return
         if self.path == "/api/admin/events":
             admin = admin_client_for(self)
@@ -426,9 +713,52 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Événement introuvable. Actualisez la page et réessayez.")
                 if event.get("status") == "archived":
                     raise ValueError("Réactivez cet événement dans Imagine Desk avant de le sélectionner.")
+                old = kiosk_settings()
+                updated = dict(old)
+                updated.update(body)
+                updated.update({"eventId": event_id,
+                                "registrationsEnabled": body.get("registrationsEnabled") is True,
+                                "paymentRequired": body.get("paymentRequired") is True,
+                                "paymentEmailEnabled": body.get("paymentEmailEnabled") is True})
+                updated["maxParticipants"] = body.get("maxParticipants", 0)
+                if updated["paymentEmailEnabled"]:
+                    if not smtp_configured():
+                        raise ValueError("Configurez d’abord le serveur SMTP dans les variables Render avant d’activer les e-mails.")
+                    if not SETTINGS_DATABASE_URL:
+                        raise ValueError("La base PostgreSQL est requise pour éviter les e-mails en double.")
+                    if not old.get("paymentEmailEnabled"):
+                        updated["paymentEmailEnabledAt"] = utc_now()
+                else:
+                    updated["paymentEmailEnabledAt"] = ""
+                updated = sanitized_settings(updated)
                 admin.call(f"/api/events/{quote(event_id, safe='')}", "PATCH", {"name": name, "date": event_date, "venue": venue})
-                save_kiosk_settings({"eventId": event_id, "registrationsEnabled": body.get("registrationsEnabled") is True})
-                self.json_response(200, {"ok": True, "event": {"id": event_id, "name": name, "date": event_date, "venue": venue}, "registrationsEnabled": body.get("registrationsEnabled") is True})
+                updated["eventId"] = event_id
+                save_kiosk_settings(updated)
+                self.json_response(200, {"ok": True, "event": {"id": event_id, "name": name, "date": event_date, "venue": venue}, "settings": updated, "smtpConfigured": smtp_configured()})
+                return
+            if self.path == "/api/admin/test-email":
+                admin = admin_client_for(self)
+                if not admin:
+                    self.json_response(401, {"error": "Votre session administrateur a expiré. Reconnectez-vous."})
+                    return
+                if not smtp_configured():
+                    raise ValueError("Le serveur SMTP n’est pas encore configuré dans Render.")
+                recipient = clean(body.get("to"), 180)
+                if not recipient or "@" not in recipient:
+                    raise ValueError("Saisissez une adresse e-mail de test valide.")
+                settings = kiosk_settings()
+                event_id = settings.get("eventId") or EVENT_ID
+                event_data = admin.call("/api/events")
+                event = next((item for item in event_data.get("events", []) if str(item.get("id")) == str(event_id)), {})
+                variables = {"name": "Participant de test", "price": "150 TND", "amount": "150", "currency": "TND",
+                             "participant_id": "TEST-001", "code": "IE-TEST", "email": recipient,
+                             "event_name": clean(event.get("name"), 180) or "Événement test", "event_date": clean(event.get("date"), 40),
+                             "venue": clean(event.get("venue"), 180), "tariff": "Tarif test", "payment_method": "test", "payment_reference": "TEST"}
+                subject_template = clean_multiline(body.get("subjectTemplate", settings["paymentEmailSubject"]), 200)
+                body_template = clean_multiline(body.get("bodyTemplate", settings["paymentEmailBody"]), 8000)
+                send_email(recipient, render_mail_template(subject_template, variables),
+                           render_mail_template(body_template, variables))
+                self.json_response(200, {"ok": True})
                 return
             missing = required_config()
             if not selected_event_id():
@@ -449,7 +779,7 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 person = find_person(query, participants(event_id))
                 if not person:
-                    self.json_response(404, {"error": "Inscription introuvable. Vérifiez l’adresse e-mail ou le code de votre badge."})
+                    self.json_response(404, {"error": kiosk_settings()["notFoundMessage"]})
                     return
                 token = secrets.token_urlsafe(32)
                 with lookup_lock:
@@ -458,7 +788,15 @@ class Handler(BaseHTTPRequestHandler):
                         if value[2] < now:
                             lookup_tokens.pop(key, None)
                     lookup_tokens[token] = (str(person.get("id")), self.client_address[0], now + 180)
-                self.json_response(200, {"lookupToken": token, "name": clean(person.get("name"), 180), "checkedIn": bool(person.get("checkedIn")), "code": clean(person.get("code"), 40)})
+                settings = kiosk_settings()
+                payment_status = person.get("paymentStatus") or "unpaid"
+                already_key = {"paid": "alreadyPaidMessage", "exempt": "alreadyExemptMessage"}.get(payment_status, "alreadyUnpaidMessage")
+                self.json_response(200, {"lookupToken": token, "name": clean(person.get("name"), 180),
+                                         "checkedIn": bool(person.get("checkedIn")), "code": clean(person.get("code"), 40),
+                                         "paymentStatus": payment_status,
+                                         "requiresPayment": bool(settings["paymentRequired"] and payment_status not in ("paid", "exempt")),
+                                         "message": (settings["paymentRequiredMessage"] if settings["paymentRequired"] and payment_status not in ("paid", "exempt") else
+                                                     settings[already_key] if person.get("checkedIn") else "")})
                 return
             if self.path == "/api/checkin":
                 token = clean(body.get("lookupToken"), 100)
@@ -472,19 +810,27 @@ class Handler(BaseHTTPRequestHandler):
                 if not person:
                     self.json_response(404, {"error": "Cette inscription est introuvable. Recommencez la recherche."})
                     return
+                settings = kiosk_settings()
+                payment_status = person.get("paymentStatus") or "unpaid"
+                if settings["paymentRequired"] and payment_status not in ("paid", "exempt"):
+                    self.json_response(409, {"error": settings["paymentRequiredMessage"]})
+                    return
                 if person.get("checkedIn"):
-                    self.json_response(200, {"ok": True, "already": True, "name": clean(person.get("name"), 180)})
+                    message_key = {"paid": "alreadyPaidMessage", "exempt": "alreadyExemptMessage"}.get(payment_status, "alreadyUnpaidMessage")
+                    self.json_response(200, {"ok": True, "already": True, "name": clean(person.get("name"), 180), "message": settings[message_key]})
                     return
                 op = {"opId": "kiosk-" + uuid.uuid4().hex, "action": "checkin", "participantId": person_id}
                 sync_path = f"/api/events/{quote(event_id, safe='')}/sync"
                 result = client.call(sync_path, "POST", {"operations": [op], "deviceId": "self-check-in"})
                 if not result.get("results") or not result["results"][0].get("ok"):
                     raise RuntimeError("Le check-in n’a pas pu être confirmé. Demandez de l’aide à l’accueil.")
-                self.json_response(200, {"ok": True, "already": False, "name": clean(person.get("name"), 180)})
+                message_key = {"paid": "arrivedPaidMessage", "exempt": "arrivedExemptMessage"}.get(payment_status, "arrivedUnpaidMessage")
+                self.json_response(200, {"ok": True, "already": False, "name": clean(person.get("name"), 180), "message": settings[message_key]})
                 return
             if self.path == "/api/register":
-                if not kiosk_settings()["registrationsEnabled"]:
-                    self.json_response(403, {"error": "Les inscriptions sur place sont momentanément fermées. Adressez-vous à l’accueil."})
+                settings = kiosk_settings()
+                if not settings["registrationsEnabled"]:
+                    self.json_response(403, {"error": settings["registrationClosedMessage"]})
                     return
                 name = clean(body.get("name"), 180)
                 email = clean(body.get("email"), 180)
@@ -501,12 +847,21 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 with registration_lock:
                     people = participants(event_id)
-                    if any(normalized(p.get("email")) == normalized(email) for p in people if p.get("email")):
-                        self.json_response(409, {"error": "Cette adresse e-mail est déjà inscrite. Utilisez le parcours « Déjà inscrit·e » pour confirmer votre arrivée."})
+                    if settings["maxParticipants"] and len(people) >= settings["maxParticipants"]:
+                        self.json_response(409, {"error": settings["capacityMessage"]})
                         return
-                    data = client.call(participants_path, "POST", {"name": name, "email": email, "company": company, "category": "participant", "checkedIn": True})
+                    if any(normalized(p.get("email")) == normalized(email) for p in people if p.get("email")):
+                        self.json_response(409, {"error": settings["duplicateEmailMessage"]})
+                        return
+                    payment_status = "unpaid" if settings["paymentRequired"] else "exempt"
+                    data = client.call(participants_path, "POST", {"name": name, "email": email, "company": company,
+                                                                    "category": "participant", "checkedIn": not settings["paymentRequired"],
+                                                                    "paymentStatus": payment_status})
                 person = data.get("participant") or {}
-                self.json_response(201, {"ok": True, "name": clean(person.get("name"), 180) or name, "code": clean(person.get("code"), 40)})
+                success_message = settings["newPaidMessage"] if settings["paymentRequired"] else settings["newFreeMessage"]
+                self.json_response(201, {"ok": True, "name": clean(person.get("name"), 180) or name,
+                                         "code": clean(person.get("code"), 40), "paymentStatus": payment_status,
+                                         "message": success_message})
                 return
             self.json_response(404, {"error": "Action inconnue."})
         except ValueError as exc:
@@ -522,6 +877,7 @@ def main():
     print(f"Imagine Self Check-in listening on http://{HOST}:{PORT}")
     if missing:
         print("Integration is not configured. Missing: " + ", ".join(missing))
+    threading.Thread(target=payment_email_worker, name="payment-email-worker", daemon=True).start()
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

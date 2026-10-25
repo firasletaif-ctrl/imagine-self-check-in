@@ -21,6 +21,8 @@ class FakeDesk:
     def call(self, path, method="GET", payload=None):
         if path == "/api/events":
             return {"events": [self.event.copy()]}
+        if path == "/api/events/event-1/prices" and method == "GET":
+            return {"prices": [{"id": "price-1", "label": "Participant", "category": "participant", "amount": 150, "active": True}]}
         if path == "/api/events/event-1" and method == "PATCH":
             self.event.update(payload)
             return {"ok": True}
@@ -111,15 +113,88 @@ class KioskApiTests(unittest.TestCase):
             server.admin_sessions["test-admin-session"] = (self.desk, "admin.test", time.monotonic() + 60)
             status, saved = self.post("/api/admin/settings", {
                 "eventId": "event-1", "name": "Forum Imagine", "date": "2026-12-01",
-                "venue": "Tunis", "registrationsEnabled": False,
+                "venue": "Tunis", "registrationsEnabled": False, "paymentRequired": True,
+                "maxParticipants": 25, "newPaidMessage": "Dirigez-vous vers le côté gauche.",
+                "paymentEmailSubject": "Reçu pour {{name}}", "paymentEmailBody": "Montant : {{price}} - {{participant_id}}",
             }, {"Cookie": "imagine_kiosk_admin=test-admin-session"})
             self.assertEqual(status, 200)
+            self.assertFalse(saved["settings"]["registrationsEnabled"])
+            self.assertTrue(saved["settings"]["paymentRequired"])
+            self.assertEqual(saved["settings"]["maxParticipants"], 25)
             self.assertEqual(self.desk.event["name"], "Forum Imagine")
-            self.assertFalse(saved["registrationsEnabled"])
             self.assertEqual(server.selected_event_id(), "event-1")
             self.assertFalse(server.kiosk_settings()["registrationsEnabled"])
+            self.assertEqual(server.kiosk_settings()["newPaidMessage"], "Dirigez-vous vers le côté gauche.")
+            self.assertEqual(server.kiosk_settings()["paymentEmailSubject"], "Reçu pour {{name}}")
             server.admin_sessions.pop("test-admin-session", None)
         server.KIOSK_CONFIG_PATH = old_path
+
+
+    def test_paid_event_registration_stays_unpaid_and_uses_admin_message(self):
+        old_path = server.KIOSK_CONFIG_PATH
+        with tempfile.TemporaryDirectory() as tempdir:
+            server.KIOSK_CONFIG_PATH = Path(tempdir) / "settings.json"
+            server.save_kiosk_settings({"eventId": "event-1", "paymentRequired": True,
+                                       "newPaidMessage": "Dirigez-vous à droite.", "registrationsEnabled": True})
+            status, data = self.post("/api/register", {"name": "Nour Test", "email": "nour@example.tn", "consent": True})
+            self.assertEqual(status, 201)
+            self.assertEqual(data["paymentStatus"], "unpaid")
+            self.assertEqual(data["message"], "Dirigez-vous à droite.")
+            self.assertEqual(self.desk.people[-1]["paymentStatus"], "unpaid")
+        self.assertFalse(self.desk.people[-1]["checkedIn"])
+        server.KIOSK_CONFIG_PATH = old_path
+
+    def test_unpaid_attendee_cannot_check_in_until_agent_confirms_payment(self):
+        old_path = server.KIOSK_CONFIG_PATH
+        with tempfile.TemporaryDirectory() as tempdir:
+            server.KIOSK_CONFIG_PATH = Path(tempdir) / "settings.json"
+            server.save_kiosk_settings({"eventId": "event-1", "paymentRequired": True,
+                                       "paymentRequiredMessage": "Merci de vous diriger à gauche."})
+            status, lookup = self.post("/api/lookup", {"query": "amira@example.tn"})
+            self.assertEqual(status, 200)
+            self.assertTrue(lookup["requiresPayment"])
+            self.assertEqual(lookup["message"], "Merci de vous diriger à gauche.")
+            status, blocked = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
+            self.assertEqual(status, 409)
+            self.assertEqual(blocked["error"], "Merci de vous diriger à gauche.")
+            self.assertFalse(self.desk.people[0]["checkedIn"])
+
+            # Simulate an agent confirming payment in Imagine Desk.
+            self.desk.people[0]["paymentStatus"] = "paid"
+            status, lookup = self.post("/api/lookup", {"query": "amira@example.tn"})
+            self.assertEqual(status, 200)
+            self.assertFalse(lookup["requiresPayment"])
+            status, checked = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
+            self.assertEqual(status, 200)
+            self.assertFalse(checked["already"])
+            self.assertTrue(self.desk.people[0]["checkedIn"])
+        server.KIOSK_CONFIG_PATH = old_path
+
+    def test_capacity_blocks_new_signup_with_admin_message(self):
+        old_path = server.KIOSK_CONFIG_PATH
+        with tempfile.TemporaryDirectory() as tempdir:
+            server.KIOSK_CONFIG_PATH = Path(tempdir) / "settings.json"
+            server.save_kiosk_settings({"eventId": "event-1", "maxParticipants": 1,
+                                       "capacityMessage": "Inscriptions terminées. Suivez la flèche bleue."})
+            status, data = self.post("/api/register", {"name": "Nouvelle personne", "email": "new@example.tn", "consent": True})
+            self.assertEqual(status, 409)
+            self.assertEqual(data["error"], "Inscriptions terminées. Suivez la flèche bleue.")
+        server.KIOSK_CONFIG_PATH = old_path
+
+    def test_custom_message_template_substitutes_requested_fields(self):
+        rendered = server.render_mail_template("{{name}} / {{price}} / {{participant_id}}", {
+            "name": "Amira", "price": "150 TND", "participant_id": "p-42"})
+        self.assertEqual(rendered, "Amira / 150 TND / p-42")
+
+
+    def test_payment_email_only_follows_a_new_agent_confirmed_payment(self):
+        settings = {"paymentEmailEnabled": True, "paymentEmailEnabledAt": "2026-10-25T10:00:00+00:00"}
+        person = {"email": "person@example.tn", "paymentStatus": "unpaid", "paymentConfirmedAt": ""}
+        self.assertFalse(server.payment_email_eligible(person, settings))
+        person.update({"paymentStatus": "paid", "paymentConfirmedAt": "2026-10-25T10:01:00+00:00"})
+        self.assertTrue(server.payment_email_eligible(person, settings))
+        person["paymentConfirmedAt"] = "2026-10-25T09:59:00+00:00"
+        self.assertFalse(server.payment_email_eligible(person, settings))
 
     def test_registration_requires_consent(self):
         status, data = self.post("/api/register", {"name": "Test User", "email": "test@example.tn"})

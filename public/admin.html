@@ -37,26 +37,69 @@
       </div>
       <div class="settings-layout">
         <section class="panel settings-panel">
-          <div class="section-title"><span class="section-number">01</span><div><h2>Événement à l’accueil</h2><p>Choisissez l’événement présenté sur l’iPad et la borne.</p></div></div>
           <form id="settings-form" class="admin-form">
-            <label for="event-select">Événement Imagine Desk</label>
-            <select id="event-select" required><option value="">Chargement des événements…</option></select>
-            <label for="event-name">Nom de l’événement</label>
-            <input id="event-name" name="name" type="text" maxlength="180" required>
-            <div class="field-pair">
-              <div><label for="event-date">Date</label><input id="event-date" name="date" type="date"></div>
-              <div><label for="event-venue">Lieu</label><input id="event-venue" name="venue" type="text" maxlength="180" placeholder="Ex. Tunis"></div>
-            </div>
-            <div class="signup-setting">
-              <span class="signup-copy"><strong>Autoriser les inscriptions sur place</strong><small>Les nouveaux visiteurs pourront s’inscrire depuis la borne.</small></span>
-              <label class="switch"><input id="registrations-enabled" type="checkbox"><span class="slider"></span><span class="sr-only">Autoriser les inscriptions sur place</span></label>
-            </div>
+            <section class="admin-section">
+              <div class="section-title"><span class="section-number">01</span><div><h2>Événement et inscriptions</h2><p>Ces réglages contrôlent l’événement affiché et les inscriptions sur place.</p></div></div>
+              <label for="event-select">Événement Imagine Desk</label>
+              <select id="event-select" required><option value="">Chargement des événements…</option></select>
+              <label for="event-name">Nom de l’événement</label>
+              <input id="event-name" name="name" type="text" maxlength="180" required>
+              <div class="field-pair">
+                <div><label for="event-date">Date</label><input id="event-date" name="date" type="date"></div>
+                <div><label for="event-venue">Lieu</label><input id="event-venue" name="venue" type="text" maxlength="180" placeholder="Ex. Tunis"></div>
+              </div>
+              <div class="signup-setting">
+                <span class="signup-copy"><strong>Autoriser les inscriptions sur place</strong><small>Les nouveaux visiteurs pourront s’inscrire depuis la borne.</small></span>
+                <label class="switch"><input id="registrations-enabled" type="checkbox"><span class="slider"></span><span class="sr-only">Autoriser les inscriptions sur place</span></label>
+              </div>
+              <div class="signup-setting">
+                <span class="signup-copy"><strong>Le règlement est requis pour cet événement</strong><small>La borne ne prend aucun paiement : elle indique au visiteur où se diriger. L’agent confirme le règlement dans Imagine Desk.</small></span>
+                <label class="switch"><input id="payment-required" type="checkbox"><span class="slider"></span><span class="sr-only">Règlement requis</span></label>
+              </div>
+              <div class="field"><label for="max-participants">Nombre maximum d’inscrits <span class="optional">(0 = sans limite)</span></label><input id="max-participants" type="number" min="0" max="100000" step="1" value="0"></div>
+              <div class="price-summary"><strong>Tarifs Imagine Desk</strong><p>La borne utilise la grille déjà définie dans Imagine Desk. L’agent choisit le tarif et confirme le règlement dans le Desk.</p><div id="price-list" class="price-list"><span class="muted">Chargement des tarifs…</span></div></div>
+            </section>
+
+            <section class="admin-section">
+              <div class="section-title"><span class="section-number">02</span><div><h2>Messages affichés sur la borne</h2><p>Écris les consignes comme tu veux. Elles sont montrées après l’action correspondante.</p></div></div>
+              <div class="message-fields">
+                <div class="field"><label for="msg-new-paid">Nouvelle inscription — règlement requis</label><textarea id="msg-new-paid" data-setting="newPaidMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-new-free">Nouvelle inscription — événement gratuit</label><textarea id="msg-new-free" data-setting="newFreeMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-arrived-paid">Préinscrit·e payé·e — arrivée confirmée</label><textarea id="msg-arrived-paid" data-setting="arrivedPaidMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-arrived-unpaid">Arrivée confirmée — non payé (paiement non requis)</label><textarea id="msg-arrived-unpaid" data-setting="arrivedUnpaidMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-payment-required">Préinscrit·e non payé·e — règlement requis avant check-in</label><textarea id="msg-payment-required" data-setting="paymentRequiredMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-arrived-exempt">Préinscrit·e exonéré·e — arrivée confirmée</label><textarea id="msg-arrived-exempt" data-setting="arrivedExemptMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-already-paid">Arrivée déjà enregistrée — paiement confirmé</label><textarea id="msg-already-paid" data-setting="alreadyPaidMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-already-unpaid">Arrivée déjà enregistrée — paiement à confirmer</label><textarea id="msg-already-unpaid" data-setting="alreadyUnpaidMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-already-exempt">Arrivée déjà enregistrée — exonéré·e</label><textarea id="msg-already-exempt" data-setting="alreadyExemptMessage" rows="3" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-capacity">Événement complet</label><textarea id="msg-capacity" data-setting="capacityMessage" rows="2" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-closed">Inscriptions fermées</label><textarea id="msg-closed" data-setting="registrationClosedMessage" rows="2" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-not-found">Inscription introuvable</label><textarea id="msg-not-found" data-setting="notFoundMessage" rows="2" maxlength="1000"></textarea></div>
+                <div class="field"><label for="msg-duplicate">E-mail déjà inscrit</label><textarea id="msg-duplicate" data-setting="duplicateEmailMessage" rows="2" maxlength="1000"></textarea></div>
+              </div>
+            </section>
+
+            <section class="admin-section">
+              <div class="section-title"><span class="section-number">03</span><div><h2>E-mail après confirmation du paiement</h2><p>L’agent confirme le paiement dans Imagine Desk; la borne envoie ensuite le récapitulatif au participant.</p></div></div>
+              <div id="smtp-status" class="smtp-status" role="status">Vérification de la configuration e-mail…</div>
+              <div class="signup-setting">
+                <span class="signup-copy"><strong>Envoyer un e-mail après paiement confirmé</strong><small>Pas d’envoi avant que l’agent ait marqué le paiement « Payé » dans Imagine Desk.</small></span>
+                <label class="switch"><input id="payment-email-enabled" type="checkbox"><span class="slider"></span><span class="sr-only">Activer l’e-mail après paiement</span></label>
+              </div>
+              <div class="field"><label for="email-subject">Objet de l’e-mail</label><input id="email-subject" data-setting="paymentEmailSubject" maxlength="200"></div>
+              <div class="field"><label for="email-body">Texte de l’e-mail</label><textarea id="email-body" data-setting="paymentEmailBody" rows="9" maxlength="8000"></textarea></div>
+              <div class="template-help"><strong>Variables disponibles</strong><code>{{name}}</code><code>{{price}}</code><code>{{amount}}</code><code>{{currency}}</code><code>{{participant_id}}</code><code>{{code}}</code><code>{{event_name}}</code><code>{{event_date}}</code><code>{{venue}}</code><code>{{tariff}}</code><code>{{payment_method}}</code><code>{{payment_reference}}</code></div>
+              <div class="test-email-row"><label for="test-email-to">Tester le modèle sur l’adresse</label><div class="test-email-controls"><input id="test-email-to" type="email" inputmode="email" placeholder="toi@exemple.tn"><button id="test-email-button" class="secondary-button" type="button">Envoyer un e-mail de test</button></div></div>
+              <p id="email-test-status" class="save-status" role="status"></p>
+            </section>
+
             <p id="settings-error" class="error" role="alert" hidden></p>
             <div class="form-actions"><span id="save-status" class="save-status" aria-live="polite"></span><button class="primary-button" type="submit">Enregistrer les réglages <span aria-hidden="true">→</span></button></div>
           </form>
         </section>
         <aside class="side-column">
-          <section class="panel side-panel"><span class="side-icon">↗</span><h3>Les changements sont partagés</h3><p>Le nom, la date et le lieu sont modifiés dans Imagine Desk. Ils seront visibles dans le Desk et sur la borne.</p></section>
+          <section class="panel side-panel"><span class="side-icon">↗</span><h3>Les changements sont partagés</h3><p>Le nom, la date et le lieu sont modifiés dans Imagine Desk. Les paramètres de la borne sont conservés dans sa base Render.</p></section>
+          <section class="panel side-panel"><span class="side-icon safe">✓</span><h3>Pas de paiement en ligne</h3><p>La borne inscrit les personnes et affiche tes consignes. Seul un agent enregistre la confirmation du règlement dans Imagine Desk.</p></section>
           <section class="panel side-panel"><span class="side-icon safe">✓</span><h3>Accès protégé</h3><p>Seuls les comptes administrateur Imagine Desk peuvent modifier ces réglages. Les comptes agent ne peuvent pas y accéder.</p></section>
         </aside>
       </div>
