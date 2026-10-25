@@ -1,4 +1,5 @@
 import json
+import io
 import threading
 import tempfile
 import time
@@ -186,6 +187,40 @@ class KioskApiTests(unittest.TestCase):
             "name": "Amira", "price": "150 TND", "participant_id": "p-42"})
         self.assertEqual(rendered, "Amira / 150 TND / p-42")
 
+
+    def test_program_attachment_validation_and_email_mime(self):
+        filename, content_type, content = server.validate_email_attachment("../programme.pdf", b"%PDF-1.7\nprogramme test")
+        self.assertEqual(filename, "programme.pdf")
+        self.assertEqual(content_type, "application/pdf")
+        self.assertEqual(content, b"%PDF-1.7\nprogramme test")
+        self.assertEqual(server.validate_email_attachment("photo.jpg", b"\xff\xd8\xffphoto")[1], "image/jpeg")
+        self.assertEqual(server.validate_email_attachment("photo.png", b"\x89PNG\r\n\x1a\nphoto")[1], "image/png")
+        self.assertEqual(server.validate_email_attachment("photo.webp", b"RIFF0000WEBPdata")[1], "image/webp")
+        with self.assertRaises(ValueError):
+            server.validate_email_attachment("programme.pdf", b"not a pdf")
+        with self.assertRaises(ValueError):
+            server.validate_email_attachment("programme.txt", b"plain text")
+        with self.assertRaises(ValueError):
+            server.validate_email_attachment("too-large.pdf", b"%PDF-" + b"x" * server.MAX_EMAIL_ATTACHMENT_BYTES)
+
+        boundary = "arena-boundary"
+        raw = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"programme.pdf\"\r\n"
+               "Content-Type: application/pdf\r\n\r\n%PDF-1.7\r\n--arena-boundary--\r\n").encode()
+        handler = object.__new__(server.Handler)
+        handler.headers = {"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(raw))}
+        handler.rfile = io.BytesIO(raw)
+        parsed_name, parsed_content = handler.read_multipart_file()
+        self.assertEqual(parsed_name, "programme.pdf")
+        self.assertEqual(parsed_content, b"%PDF-1.7")
+
+        message = server.build_email_message("person@example.com", "Programme", "Voici le programme.", [
+            {"filename": filename, "contentType": content_type, "content": content}
+        ])
+        self.assertTrue(message.is_multipart())
+        attachment = next(message.iter_attachments())
+        self.assertEqual(attachment.get_filename(), "programme.pdf")
+        self.assertEqual(attachment.get_content_type(), "application/pdf")
+        self.assertEqual(attachment.get_payload(decode=True), content)
 
     def test_payment_email_only_follows_a_new_agent_confirmed_payment(self):
         settings = {"paymentEmailEnabled": True, "paymentEmailEnabledAt": "2026-10-25T10:00:00+00:00"}
