@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1d3a">
+  <meta name="description" content="Inscription et accueil des participants Imagine Events">
+  <title>Imagine · Accueil</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Imagine Events, accueil">
+      <img class="brand-logo" src="/logo.png" alt="Imagine Events">
+    </a>
+    <div class="topbar-right">
+      <div class="service-indicator"><i></i><span data-i18n="welcomeDesk">Borne d’accueil</span></div>
+      <div class="language-switch" role="group" aria-label="Language">
+        <button type="button" class="lang-btn active" data-lang="fr" aria-pressed="true">FR</button>
+        <button type="button" class="lang-btn" data-lang="en" aria-pressed="false">EN</button>
+        <button type="button" class="lang-btn" data-lang="ar" aria-pressed="false">ع</button>
+      </div>
+    </div>
+  </header>
+
+  <main id="app" class="app-shell">
+    <div id="connection-banner" class="connection-banner" hidden></div>
+    <section id="event-head" class="event-head" aria-live="polite">
+      <div class="event-orb" aria-hidden="true"><svg viewBox="0 0 48 48" fill="none"><path d="M8 13.5A3.5 3.5 0 0 1 11.5 10h25a3.5 3.5 0 0 1 3.5 3.5v5.1a5.4 5.4 0 0 0 0 10.8v5.1a3.5 3.5 0 0 1-3.5 3.5h-25A3.5 3.5 0 0 1 8 34.5v-5.1a5.4 5.4 0 0 0 0-10.8v-5.1Z" stroke="currentColor" stroke-width="2.2"/><path d="M27 14v3m0 5v3m0 5v3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></div>
+      <div class="event-meta"><span class="eyebrow" data-i18n="youAreHere">Bienvenue à</span><h1 id="event-name">Chargement…</h1><p id="event-details" class="event-details"></p></div>
+      <span class="event-spark" aria-hidden="true">✳</span>
+    </section>
+
+    <section id="screen-home" class="screen screen-home">
+      <div class="welcome-copy"><span class="eyebrow" data-i18n="welcome">Bienvenue</span><h2 data-i18n="welcomeTitle">Êtes-vous déjà inscrit·e à cet événement ?</h2><p id="welcome-desc" data-i18n="welcomeDesc">Choisissez OUI pour retrouver votre inscription, ou NON pour vous inscrire sur place.</p></div>
+      <div class="choice-grid">
+        <button class="choice-card choice-existing" type="button" data-action="show-lookup">
+          <span class="choice-icon"><svg viewBox="0 0 48 48" fill="none"><path d="M8 18.5 24 10l16 8.5v19a2.5 2.5 0 0 1-2.5 2.5h-27A2.5 2.5 0 0 1 8 37.5v-19Z" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round"/><path d="M18 40V27h12v13M16 20h.01M24 20h.01M32 20h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span class="choice-text"><span class="choice-kicker" data-i18n="alreadyLabel">OUI</span><strong data-i18n="alreadyTitle">Je suis déjà inscrit·e</strong><small data-i18n="alreadyDesc">Je retrouve mon inscription avec mon e-mail ou mon code.</small></span>
+          <span class="choice-arrow" aria-hidden="true">↗</span>
+        </button>
+        <button id="register-choice" class="choice-card choice-new" type="button" data-action="show-register">
+          <span class="choice-icon"><svg viewBox="0 0 48 48" fill="none"><circle cx="20" cy="16" r="8" stroke="currentColor" stroke-width="2.4"/><path d="M6.5 39c1.7-7.1 6.2-10.7 13.5-10.7 4.1 0 7.3 1.2 9.7 3.6M36 22v15m-7.5-7.5h15" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg></span>
+          <span class="choice-text"><span class="choice-kicker" data-i18n="newLabel">NON</span><strong data-i18n="newTitle">Je ne suis pas encore inscrit·e</strong><small data-i18n="newDesc">Je remplis le formulaire sur cette borne.</small></span>
+          <span class="choice-arrow" aria-hidden="true">↗</span>
+        </button>
+      </div>
+      <div class="privacy-note"><span class="lock-icon">▣</span><span data-i18n="privacyNote">Vos informations sont utilisées uniquement pour l’organisation de cet événement.</span></div>
+    </section>
+
+    <section id="screen-lookup" class="screen form-screen" hidden>
+      <button class="back-button" type="button" data-action="home"><span aria-hidden="true">←</span><span data-i18n="back">Retour</span></button>
+      <div class="step-heading"><span class="step-pill"><i></i><span data-i18n="stepOne">ÉTAPE 1 SUR 2</span></span><h2 data-i18n="lookupTitle">Retrouvons votre inscription.</h2><p data-i18n="lookupDesc">Entrez l’e-mail utilisé pour vous inscrire. Vous pouvez aussi saisir le code inscrit sur votre badge.</p></div>
+      <form id="lookup-form" class="kiosk-form">
+        <label for="lookup-query" data-i18n="emailOrCode">Adresse e-mail ou code d’inscription</label>
+        <div class="input-wrap"><span class="input-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><circle cx="10.8" cy="10.8" r="6.8" stroke="currentColor" stroke-width="2"/><path d="m16 16 4.2 4.2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><input id="lookup-query" name="query" type="text" inputmode="email" enterkeyhint="search" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="240" placeholder="nom@exemple.tn" required></div>
+        <p class="form-error" id="lookup-error" role="alert" hidden></p>
+        <button class="primary-button" type="submit"><span data-i18n="findButton">Rechercher mon inscription</span><span class="button-arrow" aria-hidden="true">→</span></button>
+      </form>
+      <div class="help-hint"><span class="hint-dot">i</span><span data-i18n="lookupHint">Vous ne retrouvez pas votre e-mail ? Adressez-vous à l’équipe d’accueil.</span></div>
+    </section>
+
+    <section id="screen-confirm" class="screen confirm-screen" hidden>
+      <button class="back-button" type="button" data-action="show-lookup"><span aria-hidden="true">←</span><span data-i18n="back">Retour</span></button>
+      <div class="step-heading"><span class="step-pill"><i></i><span data-i18n="stepTwo">ÉTAPE 2 SUR 2</span></span><h2 data-i18n="confirmTitle">Nous avons trouvé votre inscription.</h2><p data-i18n="confirmDesc">C’est bien vous ? Touchez le bouton ci-dessous pour signaler votre arrivée.</p></div>
+      <div class="identity-card"><span class="identity-avatar" id="identity-initials">IE</span><span><small data-i18n="registeredAs">INSCRIPTION AU NOM DE</small><strong id="identity-name">—</strong></span><span class="identity-check">✓</span></div>
+      <div id="already-arrived" class="already-arrived" hidden><span>✓</span><span data-i18n="alreadyChecked">Votre arrivée est déjà confirmée. Bienvenue !</span></div>
+      <button id="confirm-checkin" class="primary-button" type="button"><span data-i18n="confirmButton">Oui, confirmer mon arrivée</span><span class="button-arrow" aria-hidden="true">→</span></button>
+      <p class="form-error" id="checkin-error" role="alert" hidden></p>
+    </section>
+
+    <section id="screen-register" class="screen form-screen" hidden>
+      <button class="back-button" type="button" data-action="home"><span aria-hidden="true">←</span><span data-i18n="back">Retour</span></button>
+      <div class="step-heading"><span class="step-pill"><i></i><span data-i18n="quickForm">INSCRIPTION EXPRESS</span></span><h2 data-i18n="registerTitle">Faites connaissance avec nous.</h2><p data-i18n="registerDesc">Complétez ces quelques informations pour vous inscrire et confirmer votre arrivée.</p></div>
+      <form id="register-form" class="kiosk-form register-form">
+        <div class="field-grid">
+          <div class="field"><label for="full-name" data-i18n="fullName">Nom et prénom</label><input id="full-name" name="name" type="text" autocomplete="name" maxlength="180" placeholder="Ex. Amira Ben Salem" required></div>
+          <div class="field"><label for="email" data-i18n="email">Adresse e-mail</label><input id="email" name="email" type="email" inputmode="email" autocomplete="email" autocapitalize="none" maxlength="180" placeholder="nom@exemple.tn" required></div>
+        </div>
+        <div class="field"><label for="company"><span data-i18n="organization">Organisation</span> <span class="optional" data-i18n="optional">(facultatif)</span></label><input id="company" name="company" type="text" autocomplete="organization" maxlength="180" placeholder="Ex. Université de Tunis"></div>
+        <label class="consent-row"><input type="checkbox" name="consent" required><span class="custom-checkbox" aria-hidden="true">✓</span><span data-i18n="consent">J’accepte que ces informations soient utilisées pour gérer ma participation à cet événement.</span></label>
+        <div class="honeypot" aria-hidden="true"><label for="website">Website</label><input id="website" name="website" tabindex="-1" autocomplete="off"></div>
+        <p class="form-error" id="register-error" role="alert" hidden></p>
+        <button class="primary-button" type="submit"><span data-i18n="registerButton">M’inscrire et confirmer mon arrivée</span><span class="button-arrow" aria-hidden="true">→</span></button>
+        <p class="secure-note"><span aria-hidden="true">⌑</span><span data-i18n="secureNote">Connexion sécurisée. Vos données sont transmises directement à l’équipe de l’événement.</span></p>
+      </form>
+    </section>
+
+    <section id="screen-done" class="screen done-screen" hidden>
+      <div class="success-mark"><svg viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="29" stroke="currentColor" stroke-width="2"/><path d="m18 32 9 9 19-20" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+      <span class="eyebrow" data-i18n="allSet">C’EST FAIT</span>
+      <h2 id="done-title" data-i18n="doneTitle">Bienvenue parmi nous !</h2>
+      <p id="done-message" data-i18n="doneDesc">Votre arrivée est confirmée. Vous pouvez rejoindre l’événement.</p>
+      <div id="badge-code-card" class="badge-code-card" hidden><small data-i18n="yourCode">VOTRE CODE D’INSCRIPTION</small><strong id="badge-code"></strong><p data-i18n="codeHint">Gardez ce code à portée de main.</p></div>
+      <button class="secondary-button" type="button" data-action="home"><span data-i18n="nextGuest">Accueil de la borne</span><span aria-hidden="true">↗</span></button>
+      <p class="auto-reset" data-i18n="autoReset">La borne reviendra à l’accueil automatiquement.</p>
+    </section>
+
+    <footer class="page-footer"><span data-i18n="footerLeft">Un accueil imaginé pour vous.</span><span class="footer-brand"><b>IMAGINE</b> EVENTS <i>·</i> <span data-i18n="footerRight">Événements & rencontres</span></span></footer>
+  </main>
+  <div id="busy-overlay" class="busy-overlay" hidden><span class="loader"></span><span id="busy-label" data-i18n="working">Un instant…</span></div>
+</body>
+</html>
