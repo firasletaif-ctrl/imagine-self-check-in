@@ -19,11 +19,13 @@ import time
 import uuid
 from collections import defaultdict, deque
 from datetime import date, datetime, timezone
+from email import policy
 from email.message import EmailMessage
+from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent
@@ -48,6 +50,10 @@ SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1").strip().lower() not in {"0", "fals
 settings_schema_ready = False
 ADMIN_SESSION_TTL = 8 * 60 * 60
 MAX_BODY = 32_000
+MAX_EMAIL_ATTACHMENT_FILES = 5
+MAX_EMAIL_ATTACHMENT_BYTES = 5 * 1024 * 1024
+MAX_EMAIL_ATTACHMENTS_TOTAL_BYTES = 12 * 1024 * 1024
+MAX_EMAIL_UPLOAD_REQUEST_BYTES = MAX_EMAIL_ATTACHMENT_BYTES + 64 * 1024
 RATE_LIMIT = 20
 RATE_WINDOW = 60
 
@@ -201,6 +207,15 @@ def ensure_settings_schema() -> None:
                     last_error TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY(event_id, participant_id, payment_confirmed_at)
                 )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS self_checkin_email_attachments (
+                    id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    content_type TEXT NOT NULL,
+                    content BYTEA NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )""")
             settings_schema_ready = True
         except Exception as exc:
             raise RuntimeError("Impossible de joindre PostgreSQL pour les réglages de la borne.") from exc
@@ -333,14 +348,112 @@ def email_variables(person: dict, event: dict) -> dict:
     }
 
 
-def send_email(to_address: str, subject: str, body: str) -> None:
-    if not smtp_configured():
-        raise RuntimeError("Le serveur e-mail SMTP n’est pas configuré.")
+def validate_email_attachment(filename: str, content: bytes) -> tuple[str, str, bytes]:
+    """Validate a program file using its extension and signature, not browser MIME metadata."""
+    if not isinstance(content, bytes) or not content:
+        raise ValueError("Le fichier est vide ou illisible.")
+    if len(content) > MAX_EMAIL_ATTACHMENT_BYTES:
+        raise ValueError("Chaque pièce jointe doit faire 5 Mo maximum.")
+    raw_name = Path(str(filename or "").replace("\\", "/")).name
+    extension = Path(raw_name).suffix.lower()
+    allowed = {
+        ".pdf": ("application/pdf", lambda data: data.startswith(b"%PDF-")),
+        ".jpg": ("image/jpeg", lambda data: data.startswith(b"\xff\xd8\xff")),
+        ".jpeg": ("image/jpeg", lambda data: data.startswith(b"\xff\xd8\xff")),
+        ".png": ("image/png", lambda data: data.startswith(b"\x89PNG\r\n\x1a\n")),
+        ".webp": ("image/webp", lambda data: len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"),
+    }
+    file_type = allowed.get(extension)
+    if not file_type or not file_type[1](content):
+        raise ValueError("Formats acceptés : PDF, JPG, JPEG, PNG et WebP (fichier valide requis).")
+    safe_name = re.sub(r"[^A-Za-z0-9._ -]", "_", raw_name).strip(" .")[:120]
+    if not safe_name:
+        safe_name = "programme" + extension
+    return safe_name, file_type[0], content
+
+
+def list_email_attachments(event_id: str) -> list[dict]:
+    if not SETTINGS_DATABASE_URL:
+        raise RuntimeError("Une base PostgreSQL est nécessaire pour conserver les pièces jointes du programme.")
+    ensure_settings_schema()
+    try:
+        with settings_database_connect() as connection:
+            rows = connection.execute("""SELECT id, filename, content_type, size_bytes, created_at
+                FROM self_checkin_email_attachments WHERE event_id=%s ORDER BY created_at, filename""", (event_id,)).fetchall()
+        return [{"id": row[0], "filename": row[1], "contentType": row[2], "sizeBytes": row[3],
+                 "createdAt": row[4].isoformat() if row[4] else ""} for row in rows]
+    except Exception as exc:
+        raise RuntimeError("Impossible de lire les pièces jointes du programme dans PostgreSQL.") from exc
+
+
+def load_email_attachments(event_id: str) -> list[dict]:
+    if not SETTINGS_DATABASE_URL:
+        return []
+    ensure_settings_schema()
+    try:
+        with settings_database_connect() as connection:
+            rows = connection.execute("""SELECT filename, content_type, content
+                FROM self_checkin_email_attachments WHERE event_id=%s ORDER BY created_at, filename""", (event_id,)).fetchall()
+        return [{"filename": row[0], "contentType": row[1], "content": bytes(row[2])} for row in rows]
+    except Exception as exc:
+        raise RuntimeError("Impossible de charger les pièces jointes du programme.") from exc
+
+
+def store_email_attachment(event_id: str, filename: str, content: bytes) -> dict:
+    if not SETTINGS_DATABASE_URL:
+        raise RuntimeError("Une base PostgreSQL est nécessaire pour conserver les pièces jointes du programme.")
+    safe_name, content_type, content = validate_email_attachment(filename, content)
+    ensure_settings_schema()
+    attachment_id = uuid.uuid4().hex
+    try:
+        with settings_database_connect() as connection:
+            usage = connection.execute("""SELECT COUNT(*), COALESCE(SUM(size_bytes),0)
+                FROM self_checkin_email_attachments WHERE event_id=%s""", (event_id,)).fetchone()
+            if usage[0] >= MAX_EMAIL_ATTACHMENT_FILES:
+                raise ValueError("Vous pouvez ajouter jusqu’à 5 pièces jointes par événement.")
+            if usage[1] + len(content) > MAX_EMAIL_ATTACHMENTS_TOTAL_BYTES:
+                raise ValueError("La taille totale des pièces jointes ne peut pas dépasser 12 Mo par événement.")
+            connection.execute("""INSERT INTO self_checkin_email_attachments
+                (id,event_id,filename,content_type,content,size_bytes)
+                VALUES(%s,%s,%s,%s,%s,%s)""",
+                (attachment_id, event_id, safe_name, content_type, content, len(content)))
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError("Impossible d’enregistrer la pièce jointe dans PostgreSQL.") from exc
+    return {"id": attachment_id, "filename": safe_name, "contentType": content_type, "sizeBytes": len(content)}
+
+
+def delete_email_attachment(event_id: str, attachment_id: str) -> bool:
+    if not SETTINGS_DATABASE_URL:
+        raise RuntimeError("Une base PostgreSQL est nécessaire pour gérer les pièces jointes du programme.")
+    ensure_settings_schema()
+    try:
+        with settings_database_connect() as connection:
+            cursor = connection.execute("DELETE FROM self_checkin_email_attachments WHERE event_id=%s AND id=%s", (event_id, attachment_id))
+            return cursor.rowcount == 1
+    except Exception as exc:
+        raise RuntimeError("Impossible de supprimer la pièce jointe dans PostgreSQL.") from exc
+
+
+def build_email_message(to_address: str, subject: str, body: str, attachments: list[dict] | None = None) -> EmailMessage:
     message = EmailMessage()
-    message["From"] = SMTP_FROM
+    message["From"] = SMTP_FROM or "Imagine Events <noreply@example.com>"
     message["To"] = to_address
     message["Subject"] = subject[:200]
     message.set_content(body[:10000])
+    for attachment in attachments or []:
+        content_type = attachment.get("contentType", "application/octet-stream")
+        maintype, _, subtype = content_type.partition("/")
+        message.add_attachment(bytes(attachment.get("content") or b""), maintype=maintype,
+                               subtype=subtype or "octet-stream", filename=attachment.get("filename") or "programme")
+    return message
+
+
+def send_email(to_address: str, subject: str, body: str, attachments: list[dict] | None = None) -> None:
+    if not smtp_configured():
+        raise RuntimeError("Le serveur e-mail SMTP n’est pas configuré.")
+    message = build_email_message(to_address, subject, body, attachments)
     context = ssl.create_default_context()
     try:
         if SMTP_PORT == 465:
@@ -418,6 +531,7 @@ def poll_payment_emails_once() -> None:
     event = next((item for item in event_data.get("events", []) if str(item.get("id")) == str(event_id)), None)
     if not event or event.get("status") == "archived":
         return
+    attachments = load_email_attachments(event_id)
     for person in participants(event_id):
         confirmed_at = str(person.get("paymentConfirmedAt") or "")
         email = clean(person.get("email"), 180)
@@ -430,7 +544,7 @@ def poll_payment_emails_once() -> None:
         try:
             send_email(email,
                        render_mail_template(settings["paymentEmailSubject"], variables),
-                       render_mail_template(settings["paymentEmailBody"], variables))
+                       render_mail_template(settings["paymentEmailBody"], variables), attachments)
             finish_payment_email(event_id, person_id, confirmed_at, True)
         except Exception:
             finish_payment_email(event_id, person_id, confirmed_at, False)
@@ -464,6 +578,11 @@ def admin_client_for(handler):
             admin_sessions.pop(token, None)
             return None
         return session[0]
+
+
+def admin_event_exists(admin, event_id: str) -> bool:
+    data = admin.call("/api/events")
+    return any(str(event.get("id")) == str(event_id) for event in data.get("events", []))
 
 
 def clean(value, limit=180) -> str:
@@ -559,6 +678,33 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Formulaire invalide.")
         return data
 
+    def read_multipart_file(self) -> tuple[str, bytes]:
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.lower().startswith("multipart/form-data;"):
+            raise ValueError("Le formulaire de fichier est invalide.")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            raise ValueError("Requête invalide.")
+        if length < 1 or length > MAX_EMAIL_UPLOAD_REQUEST_BYTES:
+            raise ValueError("Le fichier dépasse la taille maximale autorisée de 5 Mo.")
+        raw = self.rfile.read(length)
+        envelope = (f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("ascii", "replace") + raw)
+        parsed = BytesParser(policy=policy.default).parsebytes(envelope)
+        if not parsed.is_multipart():
+            raise ValueError("Le formulaire de fichier est invalide.")
+        files = []
+        for part in parsed.iter_parts():
+            if part.get_content_disposition() != "form-data":
+                continue
+            name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename()
+            if name == "file" and filename:
+                files.append((filename, part.get_payload(decode=True) or b""))
+        if len(files) != 1:
+            raise ValueError("Sélectionnez un seul fichier à importer à la fois.")
+        return files[0]
+
     def rate_limited(self) -> bool:
         ip = self.client_address[0]
         now = time.monotonic()
@@ -597,6 +743,24 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 settings = kiosk_settings()
                 self.json_response(200, {"settings": settings, "smtpConfigured": smtp_configured()})
+            except RuntimeError as exc:
+                self.json_response(503, {"error": str(exc)})
+            return
+        attachment_list_match = re.fullmatch(r"/api/admin/events/([^/]+)/email-attachments", self.path)
+        if attachment_list_match:
+            admin = admin_client_for(self)
+            if not admin:
+                self.json_response(401, {"error": "Connectez-vous avec un compte administrateur Imagine Desk."})
+                return
+            event_id = clean(unquote(attachment_list_match.group(1)), 100)
+            try:
+                if not event_id or not admin_event_exists(admin, event_id):
+                    self.json_response(404, {"error": "Événement introuvable."})
+                    return
+                self.json_response(200, {"attachments": list_email_attachments(event_id),
+                                         "maxFiles": MAX_EMAIL_ATTACHMENT_FILES,
+                                         "maxFileBytes": MAX_EMAIL_ATTACHMENT_BYTES,
+                                         "maxTotalBytes": MAX_EMAIL_ATTACHMENTS_TOTAL_BYTES})
             except RuntimeError as exc:
                 self.json_response(503, {"error": str(exc)})
             return
@@ -654,6 +818,20 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(429, {"error": "Trop de tentatives. Patientez une minute puis réessayez."})
             return
         try:
+            attachment_upload_match = re.fullmatch(r"/api/admin/events/([^/]+)/email-attachments", self.path)
+            if attachment_upload_match:
+                admin = admin_client_for(self)
+                if not admin:
+                    self.json_response(401, {"error": "Votre session administrateur a expiré. Reconnectez-vous."})
+                    return
+                event_id = clean(unquote(attachment_upload_match.group(1)), 100)
+                if not event_id or not admin_event_exists(admin, event_id):
+                    self.json_response(404, {"error": "Événement introuvable."})
+                    return
+                filename, content = self.read_multipart_file()
+                attachment = store_email_attachment(event_id, filename, content)
+                self.json_response(201, {"ok": True, "attachment": attachment})
+                return
             body = self.read_body()
             if self.path == "/api/admin/login":
                 if not DESK_URL:
@@ -736,6 +914,22 @@ class Handler(BaseHTTPRequestHandler):
                 save_kiosk_settings(updated)
                 self.json_response(200, {"ok": True, "event": {"id": event_id, "name": name, "date": event_date, "venue": venue}, "settings": updated, "smtpConfigured": smtp_configured()})
                 return
+            attachment_delete_match = re.fullmatch(r"/api/admin/events/([^/]+)/email-attachments/([a-f0-9]{32})/delete", self.path)
+            if attachment_delete_match:
+                admin = admin_client_for(self)
+                if not admin:
+                    self.json_response(401, {"error": "Votre session administrateur a expiré. Reconnectez-vous."})
+                    return
+                event_id = clean(unquote(attachment_delete_match.group(1)), 100)
+                attachment_id = attachment_delete_match.group(2)
+                if not event_id or not admin_event_exists(admin, event_id):
+                    self.json_response(404, {"error": "Événement introuvable."})
+                    return
+                if not delete_email_attachment(event_id, attachment_id):
+                    self.json_response(404, {"error": "Cette pièce jointe n’existe plus."})
+                    return
+                self.json_response(200, {"ok": True})
+                return
             if self.path == "/api/admin/test-email":
                 admin = admin_client_for(self)
                 if not admin:
@@ -756,8 +950,9 @@ class Handler(BaseHTTPRequestHandler):
                              "venue": clean(event.get("venue"), 180), "tariff": "Tarif test", "payment_method": "test", "payment_reference": "TEST"}
                 subject_template = clean_multiline(body.get("subjectTemplate", settings["paymentEmailSubject"]), 200)
                 body_template = clean_multiline(body.get("bodyTemplate", settings["paymentEmailBody"]), 8000)
+                attachments = load_email_attachments(event_id)
                 send_email(recipient, render_mail_template(subject_template, variables),
-                           render_mail_template(body_template, variables))
+                           render_mail_template(body_template, variables), attachments)
                 self.json_response(200, {"ok": True})
                 return
             missing = required_config()

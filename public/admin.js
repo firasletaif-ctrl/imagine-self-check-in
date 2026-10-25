@@ -5,7 +5,8 @@ let smtpReady=false;
 let toastTimer;
 async function api(path,options={}){
   const headers={...(options.headers||{})};
-  if(options.body&&!headers['Content-Type'])headers['Content-Type']='application/json';
+  const isFormData=typeof FormData!=='undefined'&&options.body instanceof FormData;
+  if(options.body&&!headers['Content-Type']&&!isFormData)headers['Content-Type']='application/json';
   let response,data;
   try{response=await fetch(path,{...options,headers,cache:'no-store',credentials:'same-origin'});data=await response.json();}
   catch(e){throw new Error('Impossible de joindre le serveur. Vérifiez la connexion.');}
@@ -16,6 +17,22 @@ function showError(selector,text){const el=$(selector);el.textContent=text;el.hi
 function clearError(selector){const el=$(selector);el.textContent='';el.hidden=true;}
 function setBusy(button,busy){button.disabled=busy;}
 function showToast(text){const el=$('#toast');el.textContent=text;el.hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.hidden=true,3600);}
+function formatBytes(bytes){if(bytes<1024)return `${bytes} o`;if(bytes<1024*1024)return `${(bytes/1024).toFixed(0)} Ko`;return `${(bytes/(1024*1024)).toFixed(1)} Mo`;}
+async function loadEmailAttachments(eventId){
+  const list=$('#email-attachments-list'),status=$('#email-attachment-status');list.replaceChildren();status.textContent='Chargement des pièces jointes…';
+  if(!eventId){status.textContent='Sélectionne et enregistre un événement avant d’ajouter son programme.';return;}
+  try{
+    const data=await api(`/api/admin/events/${encodeURIComponent(eventId)}/email-attachments`);const attachments=data.attachments||[];
+    if(!attachments.length){const empty=document.createElement('li');empty.className='attachment-empty';empty.textContent='Aucun programme importé pour cet événement.';list.append(empty);}
+    for(const file of attachments){
+      const item=document.createElement('li');const details=document.createElement('span');details.className='attachment-file';
+      const name=document.createElement('strong');name.textContent=file.filename;const size=document.createElement('small');size.textContent=formatBytes(file.sizeBytes||0);details.append(name,size);
+      const remove=document.createElement('button');remove.type='button';remove.className='attachment-remove';remove.dataset.deleteAttachment=file.id;remove.textContent='Retirer';remove.setAttribute('aria-label',`Retirer ${file.filename}`);
+      item.append(details,remove);list.append(item);
+    }
+    status.textContent=`${attachments.length}/${data.maxFiles||5} pièce(s) jointe(s) · ${(data.maxTotalBytes||12*1024*1024)/(1024*1024)} Mo maximum au total.`;
+  }catch(error){status.textContent=error.message;const item=document.createElement('li');item.className='attachment-empty';item.textContent=error.message;list.append(item);}
+}
 function showLogin(){ $('#login-panel').hidden=false; $('#settings-panel').hidden=true; }
 function showSettings(username){$('#login-panel').hidden=true;$('#settings-panel').hidden=false;loadSettings(username);}
 function activeEventList(){return events.filter(e=>e.status!=='archived');}
@@ -44,7 +61,7 @@ async function loadSettings(username){
     active.forEach(event=>{const option=document.createElement('option');option.value=event.id;option.textContent=event.name+(event.date?` · ${event.date}`:'');select.append(option);});
     const selected=settings.eventId&&active.some(e=>String(e.id)===String(settings.eventId))?String(settings.eventId):String(active[0].id);
     select.value=selected;fillForm(settings);
-    const current=active.find(e=>String(e.id)===selected);populateEvent(current);loadPrices(selected);
+    const current=active.find(e=>String(e.id)===selected);populateEvent(current);loadPrices(selected);loadEmailAttachments(selected);
     const smtp=$('#smtp-status');smtp.className=`smtp-status ${smtpReady?'ready':'missing'}`;smtp.textContent=smtpReady?'Serveur e-mail configuré. Les reçus partiront après confirmation du paiement dans Imagine Desk.':'E-mail non configuré : ajoute les variables SMTP dans Render avant d’activer l’envoi.';
     $('#save-status').textContent=`Connecté en tant que ${username||'administrateur'}`;clearError('#settings-error');
   }catch(error){showError('#settings-error',error.message);}
@@ -57,7 +74,7 @@ $('#login-form').addEventListener('submit',async e=>{
   try{const data=await api('/api/admin/login',{method:'POST',body:JSON.stringify({username,password})});$('#login-form').reset();showSettings(data.username);showToast('Connexion administrateur réussie.');}
   catch(error){showError('#login-error',error.message);}finally{setBusy(button,false);}
 });
-$('#event-select').addEventListener('change',e=>{const id=String(e.target.value);populateEvent(events.find(event=>String(event.id)===id));loadPrices(id);});
+$('#event-select').addEventListener('change',e=>{const id=String(e.target.value);populateEvent(events.find(event=>String(event.id)===id));loadPrices(id);loadEmailAttachments(id);});
 $('#settings-form').addEventListener('submit',async e=>{
   e.preventDefault();clearError('#settings-error');const button=e.currentTarget.querySelector('button[type=submit]');setBusy(button,true);$('#save-status').textContent='Enregistrement en cours…';
   const selected=events.find(event=>String(event.id)===String($('#event-select').value));
@@ -71,6 +88,29 @@ $('#settings-form').addEventListener('submit',async e=>{
     $('#save-status').textContent='Réglages enregistrés';showToast('Les réglages de la borne sont enregistrés.');
   }catch(error){showError('#settings-error',error.message);$('#save-status').textContent='';if(error.status===401){showLogin();showError('#login-error','Votre session a expiré. Reconnectez-vous.');}}
   finally{setBusy(button,false);}
+});
+$('#upload-email-program').addEventListener('click',async()=>{
+  const input=$('#email-program-files'),files=Array.from(input.files||[]),status=$('#email-attachment-status');
+  const eventId=$('#event-select').value;const button=$('#upload-email-program');
+  if(!eventId){status.textContent='Sélectionne d’abord un événement.';return;}
+  if(!files.length){status.textContent='Choisis au moins un fichier PDF ou une photo.';return;}
+  setBusy(button,true);let added=0;
+  try{
+    for(const file of files){
+      const form=new FormData();form.append('file',file,file.name);
+      await api(`/api/admin/events/${encodeURIComponent(eventId)}/email-attachments`,{method:'POST',body:form});added++;
+    }
+    status.textContent=`${added} fichier(s) ajouté(s) au programme de cet événement.`;input.value='';
+  }catch(error){status.textContent=added?`${added} fichier(s) ajouté(s); arrêt sur erreur : ${error.message}`:error.message;}
+  finally{setBusy(button,false);await loadEmailAttachments(eventId);}
+});
+$('#email-attachments-list').addEventListener('click',async e=>{
+  const button=e.target.closest('[data-delete-attachment]');if(!button)return;
+  const eventId=$('#event-select').value,id=button.dataset.deleteAttachment,status=$('#email-attachment-status');
+  button.disabled=true;status.textContent='Suppression…';
+  try{await api(`/api/admin/events/${encodeURIComponent(eventId)}/email-attachments/${encodeURIComponent(id)}/delete`,{method:'POST',body:JSON.stringify({})});status.textContent='Pièce jointe retirée.';}
+  catch(error){status.textContent=error.message;}
+  finally{await loadEmailAttachments(eventId);}
 });
 $('#test-email-button').addEventListener('click',async()=>{
   const to=$('#test-email-to').value.trim();const status=$('#email-test-status');status.textContent='';

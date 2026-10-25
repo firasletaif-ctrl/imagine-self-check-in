@@ -89,6 +89,13 @@
               <div class="field"><label for="email-subject">Objet de l’e-mail</label><input id="email-subject" data-setting="paymentEmailSubject" maxlength="200"></div>
               <div class="field"><label for="email-body">Texte de l’e-mail</label><textarea id="email-body" data-setting="paymentEmailBody" rows="9" maxlength="8000"></textarea></div>
               <div class="template-help"><strong>Variables disponibles</strong><code>{{name}}</code><code>{{price}}</code><code>{{amount}}</code><code>{{currency}}</code><code>{{participant_id}}</code><code>{{code}}</code><code>{{event_name}}</code><code>{{event_date}}</code><code>{{venue}}</code><code>{{tariff}}</code><code>{{payment_method}}</code><code>{{payment_reference}}</code></div>
+              <div class="program-attachments">
+                <div><strong>Programme en pièce jointe</strong><p>Ajoute un PDF ou des photos : ils seront joints aux confirmations de paiement et aux e-mails de test. Le stockage nécessite PostgreSQL.</p></div>
+                <div class="program-upload-row"><input id="email-program-files" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp" multiple><button id="upload-email-program" class="secondary-button" type="button">Importer le programme</button></div>
+                <p class="attachment-limits">PDF, JPG, PNG ou WebP · 5 fichiers max · 5 Mo par fichier · 12 Mo au total par événement.</p>
+                <ul id="email-attachments-list" class="email-attachments-list" aria-label="Programmes joints"></ul>
+                <p id="email-attachment-status" class="save-status" role="status"></p>
+              </div>
               <div class="test-email-row"><label for="test-email-to">Tester le modèle sur l’adresse</label><div class="test-email-controls"><input id="test-email-to" type="email" inputmode="email" placeholder="toi@exemple.tn"><button id="test-email-button" class="secondary-button" type="button">Envoyer un e-mail de test</button></div></div>
               <p id="email-test-status" class="save-status" role="status"></p>
             </section>
