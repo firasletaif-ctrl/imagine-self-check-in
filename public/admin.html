@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1d3a">
+  <title>Administration · Imagine Self Check-in</title>
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+  <header class="admin-topbar">
+    <a href="/" class="admin-brand"><img src="/logo.png" alt="Imagine Events"></a>
+    <a href="/" class="back-link"><span aria-hidden="true">←</span> Retour à la borne</a>
+  </header>
+  <main class="admin-main">
+    <section id="login-panel" class="panel login-panel">
+      <div class="panel-icon" aria-hidden="true">⌘</div>
+      <p class="eyebrow">ESPACE ÉQUIPE</p>
+      <h1>Administration de la borne</h1>
+      <p class="intro">Connectez-vous avec votre compte <strong>administrateur Imagine Desk</strong> pour gérer l’événement affiché à l’accueil.</p>
+      <form id="login-form" class="admin-form">
+        <label for="username">Identifiant Imagine Desk</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+        <label for="password">Mot de passe</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button class="primary-button" type="submit">Se connecter <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="secure-hint"><span>▣</span> Mot de passe transmis de façon sécurisée et jamais enregistré par la borne.</p>
+    </section>
+
+    <section id="settings-panel" hidden>
+      <div class="page-heading">
+        <div><p class="eyebrow">PARAMÈTRES</p><h1>Réglages de la borne</h1><p class="intro">Les changements du nom, de la date et du lieu sont enregistrés directement dans Imagine Desk.</p></div>
+        <button id="logout-button" class="logout-button" type="button">Déconnexion</button>
+      </div>
+      <div class="settings-layout">
+        <section class="panel settings-panel">
+          <div class="section-title"><span class="section-number">01</span><div><h2>Événement à l’accueil</h2><p>Choisissez l’événement présenté sur l’iPad et la borne.</p></div></div>
+          <form id="settings-form" class="admin-form">
+            <label for="event-select">Événement Imagine Desk</label>
+            <select id="event-select" required><option value="">Chargement des événements…</option></select>
+            <label for="event-name">Nom de l’événement</label>
+            <input id="event-name" name="name" type="text" maxlength="180" required>
+            <div class="field-pair">
+              <div><label for="event-date">Date</label><input id="event-date" name="date" type="date"></div>
+              <div><label for="event-venue">Lieu</label><input id="event-venue" name="venue" type="text" maxlength="180" placeholder="Ex. Tunis"></div>
+            </div>
+            <div class="signup-setting">
+              <span class="signup-copy"><strong>Autoriser les inscriptions sur place</strong><small>Les nouveaux visiteurs pourront s’inscrire depuis la borne.</small></span>
+              <label class="switch"><input id="registrations-enabled" type="checkbox"><span class="slider"></span><span class="sr-only">Autoriser les inscriptions sur place</span></label>
+            </div>
+            <p id="settings-error" class="error" role="alert" hidden></p>
+            <div class="form-actions"><span id="save-status" class="save-status" aria-live="polite"></span><button class="primary-button" type="submit">Enregistrer les réglages <span aria-hidden="true">→</span></button></div>
+          </form>
+        </section>
+        <aside class="side-column">
+          <section class="panel side-panel"><span class="side-icon">↗</span><h3>Les changements sont partagés</h3><p>Le nom, la date et le lieu sont modifiés dans Imagine Desk. Ils seront visibles dans le Desk et sur la borne.</p></section>
+          <section class="panel side-panel"><span class="side-icon safe">✓</span><h3>Accès protégé</h3><p>Seuls les comptes administrateur Imagine Desk peuvent modifier ces réglages. Les comptes agent ne peuvent pas y accéder.</p></section>
+        </aside>
+      </div>
+    </section>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </main>
+</body>
+</html>

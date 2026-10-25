@@ -1,0 +1,13 @@
+{
+  "name": "Imagine Events · Borne d’accueil",
+  "short_name": "Imagine Accueil",
+  "description": "Inscription et accueil des participants",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f3f6fa",
+  "theme_color": "#0b1d3a",
+  "lang": "fr",
+  "dir": "auto",
+  "icons": [{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}

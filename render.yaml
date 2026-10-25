@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: imagine-self-check-in
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: IMAGINE_DESK_URL
+        sync: false
+      - key: IMAGINE_DESK_USERNAME
+        sync: false
+      - key: IMAGINE_DESK_PASSWORD
+        sync: false
+      - key: SELF_CHECKIN_DATABASE_URL
+        fromDatabase:
+          name: imagine-self-check-in-db
+          property: connectionString
+
+databases:
+  - name: imagine-self-check-in-db
+    plan: free
+    databaseName: imagine_self_check_in
+    user: imagine_self_check_in
