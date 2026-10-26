@@ -1068,7 +1068,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(503, {"ready": False, "event": None, "message": str(exc)})
             return
         path = self.path.split("?", 1)[0]
-        static_paths = ("/", "/index.html", "/app.js", "/styles.css", "/icon.svg", "/logo.png", "/admin", "/admin.html", "/admin.js", "/admin.css", "/help", "/help.html", "/help.js", "/help.css", "/manifest.webmanifest")
+        static_paths = ("/", "/index.html", "/app.js", "/pwa.js", "/service-worker.js", "/styles.css", "/icon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png", "/logo.png", "/admin", "/admin.html", "/admin.js", "/admin.css", "/help", "/help.html", "/help.js", "/help.css", "/manifest.webmanifest")
         kiosk_path_match = re.fullmatch(r"/([A-Za-z0-9_-]{1,32})", path) if path not in static_paths and path != "/api" else None
         admin_path_match = re.fullmatch(r"/admin/([A-Za-z0-9_-]{1,32})", path)
         if path in static_paths or kiosk_path_match or admin_path_match:

@@ -91,6 +91,22 @@ class KioskApiTests(unittest.TestCase):
         self.assertTrue(data["ready"])
         self.assertEqual(data["event"]["name"], "Imagine Summit")
 
+    def test_pwa_shell_manifest_and_icons_are_served(self):
+        with urlopen(self.base + "/service-worker.js") as response:
+            self.assertIn("javascript", response.headers.get("Content-Type", ""))
+            self.assertIn("/api/", response.read().decode("utf-8"))
+        with urlopen(self.base + "/manifest.webmanifest?station=2") as response:
+            manifest = json.loads(response.read())
+        self.assertEqual(manifest["start_url"], "/2")
+        self.assertEqual(manifest["id"], "/2")
+        self.assertTrue(any(icon["sizes"] == "192x192" for icon in manifest["icons"]))
+        self.assertTrue(any(icon["purpose"] == "maskable" for icon in manifest["icons"]))
+        for path in ("/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"):
+            with urlopen(self.base + path) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(response.headers.get("Content-Type"), "image/png")
+                self.assertTrue(response.read().startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_lookup_and_checkin_use_one_time_token(self):
         status, lookup = self.post("/api/lookup", {"query": "AMIRA@example.tn"})
         self.assertEqual(status, 200)

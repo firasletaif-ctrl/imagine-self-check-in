@@ -53,11 +53,21 @@ Définissez `IMAGINE_DESK_URL`, `IMAGINE_DESK_USERNAME` et `IMAGINE_DESK_PASSWOR
 
 Pour Render : créez un **Blueprint** depuis ce dépôt et déployez les deux ressources déclarées (`imagine-self-check-in` et `imagine-self-check-in-db`). Ajoutez ensuite les trois secrets d’Imagine Desk au service Web. Vérifiez que l’état de santé `/api/health` est vert, puis connectez-vous à `/admin`, choisissez l’événement et enregistrez les réglages. La base déclarée ici est séparée de celle du Desk; elle conserve les réglages de la borne, les pièces jointes des programmes et les identifiants d’envoi des courriels afin d’éviter les doublons. Vérifiez la durée de conservation et les limites du plan Render choisi avant un événement réel; utilisez un plan avec persistance adaptée et préparez des sauvegardes.
 
+## Installation comme application (PWA)
+
+La borne peut être installée comme une application depuis son site, sur iPhone/iPad, Mac et Windows. Ouvrez impérativement la bonne URL de borne (par exemple `/1` ou `/2`) avant l’installation afin que l’icône ouvre la station correspondante. En ligne, le site doit être servi en HTTPS.
+
+- **iPhone / iPad :** ouvrez le site dans Safari, touchez **Partager**, puis **Sur l’écran d’accueil**.
+- **Mac :** dans Safari, choisissez **Fichier → Ajouter au Dock**.
+- **Windows :** dans Microsoft Edge ou Chrome, ouvrez le menu de la barre d’adresse ou **⋯ → Applications → Installer ce site comme une application**. L’icône apparaîtra comme une application Windows.
+
+La PWA conserve ses fichiers d’interface pour afficher l’accueil hors ligne, mais la recherche, l’inscription et le check-in nécessitent toujours Internet et une connexion à Imagine Desk. Il s’agit d’une application web installable, et non d’un paquet publié dans l’App Store ou d’un installateur `.exe` distinct.
+
 ## Utilisation iPad / borne
 
 1. Démarrer Imagine Desk et cette borne sur des adresses accessibles par le même réseau ou Internet.
-2. Ouvrir l’adresse de la borne dans Safari ou Chromium. Il faut HTTPS si la borne est hébergée en ligne.
-3. Sur iPad, Safari → **Partager → Sur l’écran d’accueil**, puis activer l’accès guidé pour verrouiller l’appareil sur la borne. Sur une borne Android/Windows, activer le mode kiosque du navigateur ou du système.
+2. Ouvrir l’adresse de la borne dans Safari ou Chromium; le bouton **Installer** affiche les instructions disponibles pour l’appareil.
+3. Sur iPad, activer l’accès guidé après l’installation pour verrouiller l’appareil sur la borne. Sur une borne Android/Windows, activer le mode kiosque du navigateur ou du système.
 4. Tester avant l’événement : une inscription nouvelle, une recherche par e-mail, une recherche par code, un doublon, un retour arrière, et la synchronisation visible dans Imagine Desk.
 
 ## Périmètre du MVP / suites possibles
