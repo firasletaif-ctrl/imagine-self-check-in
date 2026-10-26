@@ -56,6 +56,8 @@ class KioskApiTests(unittest.TestCase):
         server.client, server.DESK_URL, server.DESK_USERNAME, server.DESK_PASSWORD, server.EVENT_ID = cls.previous
 
     def setUp(self):
+        with server.rate_lock:
+            server.request_times.pop("127.0.0.1", None)
         self.desk = FakeDesk()
         server.client = self.desk
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
@@ -123,6 +125,39 @@ class KioskApiTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertIn("déjà inscrite", duplicate["error"])
 
+
+    def test_help_requests_are_visible_per_station_and_deduplicated_until_resolved(self):
+        old_database_url = server.SETTINGS_DATABASE_URL
+        with server.help_requests_lock:
+            old_requests = list(server.help_requests_memory)
+            server.help_requests_memory.clear()
+        server.SETTINGS_DATABASE_URL = ""
+        self.addCleanup(setattr, server, "SETTINGS_DATABASE_URL", old_database_url)
+        self.addCleanup(self._restore_help_requests, old_requests)
+
+        status, first = self.post("/api/help", {}, {"X-Kiosk-Station": "1"})
+        self.assertEqual(status, 201)
+        self.assertEqual(first["request"]["stationLabel"], "Borne 1")
+        status, duplicate = self.post("/api/help", {}, {"X-Kiosk-Station": "1"})
+        self.assertEqual(status, 200)
+        self.assertFalse(duplicate["created"])
+        self.assertEqual(duplicate["request"]["id"], first["request"]["id"])
+        status, second = self.post("/api/help", {}, {"X-Kiosk-Station": "2"})
+        self.assertEqual(status, 201)
+        self.assertEqual(second["request"]["stationLabel"], "Borne 2")
+
+        self.assertIsNotNone(server.update_help_request(first["request"]["id"], "acknowledged", "agent"))
+        self.assertEqual(server.list_help_requests()[0]["status"], "acknowledged")
+        self.assertIsNotNone(server.update_help_request(first["request"]["id"], "resolved", "agent"))
+        self.assertEqual([item["stationId"] for item in server.list_help_requests()], ["2"])
+
+        with urlopen(self.base + "/help") as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn(b"Appels au personnel", response.read())
+
+    def _restore_help_requests(self, requests):
+        with server.help_requests_lock:
+            server.help_requests_memory[:] = requests
 
     def test_station_links_keep_independent_event_settings(self):
         old_path = server.KIOSK_CONFIG_PATH

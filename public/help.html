@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1d3a">
+  <title>Appels au personnel · Imagine</title>
+  <link rel="stylesheet" href="/help.css">
+  <script src="/help.js" defer></script>
+</head>
+<body>
+  <header class="help-topbar">
+    <a href="/" class="help-brand"><img src="/logo.png" alt="Imagine Events"></a>
+    <div class="topbar-title"><span class="eyebrow">ESPACE ÉQUIPE</span><h1>Appels au personnel</h1></div>
+    <button id="sound-toggle" class="sound-toggle" type="button" aria-pressed="false">Activer le son</button>
+  </header>
+  <main class="help-main">
+    <section id="login-panel" class="login-panel panel">
+      <span class="panel-icon" aria-hidden="true">🔒</span>
+      <h2>Connexion équipe</h2>
+      <p>Connectez-vous avec un compte administrateur Imagine Desk pour voir et gérer les appels.</p>
+      <form id="login-form">
+        <label for="username">Identifiant Imagine Desk</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+        <label for="password">Mot de passe</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button class="primary-button" type="submit">Se connecter</button>
+      </form>
+    </section>
+    <section id="dashboard" hidden>
+      <div class="dashboard-heading">
+        <div><p class="eyebrow">SUIVI EN DIRECT</p><h2>Bornes qui demandent de l’aide</h2><p id="refresh-status">Connexion…</p></div>
+        <button id="refresh-button" class="refresh-button" type="button">Actualiser</button>
+      </div>
+      <div id="dashboard-error" class="error dashboard-error" role="alert" hidden></div>
+      <div id="calls-list" class="calls-list" aria-live="polite"></div>
+      <p class="dashboard-footnote">La page se met à jour automatiquement. L’appel reste affiché jusqu’à ce qu’un membre du personnel le termine.</p>
+      <button id="logout-button" class="logout-button" type="button">Déconnexion</button>
+    </section>
+  </main>
+</body>
+</html>
