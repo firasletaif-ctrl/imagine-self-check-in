@@ -25,7 +25,8 @@ from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, unquote, urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 ROOT = Path(__file__).resolve().parent
@@ -39,14 +40,29 @@ EVENT_ID = os.getenv("IMAGINE_DESK_EVENT_ID", "").strip()
 KIOSK_CONFIG_PATH = Path(os.getenv("IMAGINE_KIOSK_CONFIG_PATH", ROOT / "data" / "kiosk_settings.json"))
 SETTINGS_DATABASE_URL = os.getenv("SELF_CHECKIN_DATABASE_URL", "").strip()
 SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
-try:
-    SMTP_PORT = int(os.getenv("SMTP_PORT", "587") or "587")
-except ValueError:
-    SMTP_PORT = 587
+
+def smtp_int_setting(name: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or str(default))
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
+SMTP_PORT = smtp_int_setting("SMTP_PORT", 587)
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", "").strip()
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "1").strip().lower() not in {"0", "false", "no"}
+SMTP_SECONDARY_HOST = os.getenv("SMTP_SECONDARY_HOST", "").strip()
+SMTP_SECONDARY_PORT = smtp_int_setting("SMTP_SECONDARY_PORT", 587)
+SMTP_SECONDARY_USERNAME = os.getenv("SMTP_SECONDARY_USERNAME", "").strip()
+SMTP_SECONDARY_PASSWORD = os.getenv("SMTP_SECONDARY_PASSWORD", "")
+SMTP_SECONDARY_FROM = os.getenv("SMTP_SECONDARY_FROM", "").strip()
+SMTP_SECONDARY_USE_TLS = os.getenv("SMTP_SECONDARY_USE_TLS", "1").strip().lower() not in {"0", "false", "no"}
+SMTP_PRIMARY_DAILY_LIMIT = smtp_int_setting("SMTP_PRIMARY_DAILY_LIMIT", 300)
+SMTP_SECONDARY_DAILY_LIMIT = smtp_int_setting("SMTP_SECONDARY_DAILY_LIMIT", 300)
+SMTP_QUOTA_TIMEZONE = os.getenv("SMTP_QUOTA_TIMEZONE", "Africa/Tunis").strip() or "Africa/Tunis"
 settings_schema_ready = False
 ADMIN_SESSION_TTL = 8 * 60 * 60
 MAX_BODY = 32_000
@@ -132,7 +148,16 @@ registration_lock = threading.Lock()
 lookup_tokens: dict[str, tuple[str, str, float]] = {}
 lookup_lock = threading.Lock()
 settings_lock = threading.RLock()
+request_context = threading.local()
 admin_sessions: dict[str, tuple[DeskClient, str, float]] = {}
+
+
+def valid_station_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{1,32}", str(value or "")))
+
+
+def current_station_id() -> str:
+    return getattr(request_context, "station_id", "default")
 admin_sessions_lock = threading.RLock()
 
 
@@ -166,9 +191,10 @@ def message_defaults() -> dict:
     }
 
 
-def default_settings() -> dict:
+def default_settings(station_id: str | None = None) -> dict:
+    station_id = station_id or current_station_id()
     return {
-        "eventId": EVENT_ID,
+        "eventId": EVENT_ID if station_id == "default" else "",
         "registrationsEnabled": True,
         "paymentRequired": False,
         "maxParticipants": 0,
@@ -197,6 +223,13 @@ def ensure_settings_schema() -> None:
                     settings_json TEXT NOT NULL DEFAULT '{}'
                 )""")
                 connection.execute("ALTER TABLE self_checkin_settings ADD COLUMN IF NOT EXISTS settings_json TEXT NOT NULL DEFAULT '{}' ")
+                connection.execute("""CREATE TABLE IF NOT EXISTS self_checkin_station_settings (
+                    station_id TEXT PRIMARY KEY,
+                    event_id TEXT NOT NULL DEFAULT '',
+                    registrations_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    settings_json TEXT NOT NULL DEFAULT '{}'
+                )""")
                 connection.execute("""CREATE TABLE IF NOT EXISTS self_checkin_payment_emails (
                     event_id TEXT NOT NULL,
                     participant_id TEXT NOT NULL,
@@ -216,28 +249,36 @@ def ensure_settings_schema() -> None:
                     size_bytes INTEGER NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS self_checkin_smtp_daily_usage (
+                    account_key TEXT NOT NULL,
+                    usage_day DATE NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(account_key, usage_day)
+                )""")
             settings_schema_ready = True
         except Exception as exc:
             raise RuntimeError("Impossible de joindre PostgreSQL pour les réglages de la borne.") from exc
 
 
-def kiosk_settings() -> dict:
-    defaults = default_settings()
+def kiosk_settings(station_id: str | None = None) -> dict:
+    station_id = station_id or current_station_id()
+    if not valid_station_id(station_id) and station_id != "default":
+        raise ValueError("Identifiant de borne invalide.")
+    defaults = default_settings(station_id)
     if SETTINGS_DATABASE_URL:
         ensure_settings_schema()
         try:
             with settings_database_connect() as connection:
-                row = connection.execute("SELECT event_id, registrations_enabled, settings_json FROM self_checkin_settings WHERE id=1").fetchone()
+                row = connection.execute("SELECT event_id, registrations_enabled, settings_json FROM self_checkin_station_settings WHERE station_id=%s", (station_id,)).fetchone()
+                if not row and station_id == "default":
+                    row = connection.execute("SELECT event_id, registrations_enabled, settings_json FROM self_checkin_settings WHERE id=1").fetchone()
             if row:
-                defaults["eventId"] = row[0]
-                defaults["registrationsEnabled"] = row[1]
                 try:
                     saved = json.loads(row[2] or "{}")
                     if isinstance(saved, dict):
                         defaults.update(saved)
                 except (TypeError, ValueError):
                     pass
-                # The canonical columns always win over the JSON copy.
                 defaults["eventId"] = row[0]
                 defaults["registrationsEnabled"] = row[1]
         except Exception as exc:
@@ -247,7 +288,13 @@ def kiosk_settings() -> dict:
             try:
                 stored = json.loads(KIOSK_CONFIG_PATH.read_text(encoding="utf-8"))
                 if isinstance(stored, dict):
-                    defaults.update(stored)
+                    stations = stored.get("stations")
+                    if isinstance(stations, dict):
+                        saved = stations.get(station_id)
+                        if isinstance(saved, dict):
+                            defaults.update(saved)
+                    elif station_id == "default":
+                        defaults.update(stored)
             except (OSError, ValueError):
                 pass
     defaults["eventId"] = clean(defaults.get("eventId"), 100)
@@ -260,14 +307,16 @@ def kiosk_settings() -> dict:
         defaults["maxParticipants"] = 0
     for key, value in message_defaults().items():
         defaults[key] = str(defaults.get(key, value) or value)[:1000]
-    defaults["paymentEmailSubject"] = str(defaults.get("paymentEmailSubject") or default_settings()["paymentEmailSubject"])[:200]
-    defaults["paymentEmailBody"] = str(defaults.get("paymentEmailBody") or default_settings()["paymentEmailBody"])[:8000]
+    defaults["paymentEmailSubject"] = str(defaults.get("paymentEmailSubject") or default_settings(station_id)["paymentEmailSubject"])[:200]
+    defaults["paymentEmailBody"] = str(defaults.get("paymentEmailBody") or default_settings(station_id)["paymentEmailBody"])[:8000]
     defaults["paymentEmailEnabledAt"] = str(defaults.get("paymentEmailEnabledAt") or "")[:64]
     return defaults
 
 
-def selected_event_id() -> str:
-    return kiosk_settings().get("eventId") or EVENT_ID
+def selected_event_id(station_id: str | None = None) -> str:
+    station_id = station_id or current_station_id()
+    settings = kiosk_settings(station_id)
+    return settings.get("eventId") or (EVENT_ID if station_id == "default" else "")
 
 
 def clean_multiline(value, limit: int) -> str:
@@ -275,8 +324,8 @@ def clean_multiline(value, limit: int) -> str:
     return text.strip()[:limit]
 
 
-def sanitized_settings(settings: dict) -> dict:
-    safe = default_settings()
+def sanitized_settings(settings: dict, station_id: str | None = None) -> dict:
+    safe = default_settings(station_id)
     safe["eventId"] = clean(settings.get("eventId"), 100)
     safe["registrationsEnabled"] = bool(settings.get("registrationsEnabled", True))
     safe["paymentRequired"] = bool(settings.get("paymentRequired", False))
@@ -293,31 +342,93 @@ def sanitized_settings(settings: dict) -> dict:
     return safe
 
 
-def save_kiosk_settings(settings: dict) -> None:
-    safe = sanitized_settings(settings)
+def save_kiosk_settings(settings: dict, station_id: str | None = None) -> None:
+    station_id = station_id or current_station_id()
+    if station_id != "default" and not valid_station_id(station_id):
+        raise ValueError("Identifiant de borne invalide.")
+    safe = sanitized_settings(settings, station_id)
     encoded = json.dumps(safe, ensure_ascii=False)
     if SETTINGS_DATABASE_URL:
         ensure_settings_schema()
         try:
             with settings_database_connect() as connection:
-                connection.execute("""INSERT INTO self_checkin_settings(id,event_id,registrations_enabled,updated_at,settings_json)
-                    VALUES(1,%s,%s,CURRENT_TIMESTAMP,%s)
-                    ON CONFLICT(id) DO UPDATE SET event_id=EXCLUDED.event_id,
+                connection.execute("""INSERT INTO self_checkin_station_settings(station_id,event_id,registrations_enabled,updated_at,settings_json)
+                    VALUES(%s,%s,%s,CURRENT_TIMESTAMP,%s)
+                    ON CONFLICT(station_id) DO UPDATE SET event_id=EXCLUDED.event_id,
                     registrations_enabled=EXCLUDED.registrations_enabled,updated_at=CURRENT_TIMESTAMP,
                     settings_json=EXCLUDED.settings_json""",
-                    (safe["eventId"], safe["registrationsEnabled"], encoded))
+                    (station_id, safe["eventId"], safe["registrationsEnabled"], encoded))
         except Exception as exc:
             raise RuntimeError("Impossible d’enregistrer les réglages dans PostgreSQL.") from exc
         return
     with settings_lock:
+        try:
+            stored = json.loads(KIOSK_CONFIG_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = {}
+        stations = stored.get("stations") if isinstance(stored, dict) else None
+        if not isinstance(stations, dict):
+            stations = {"default": stored} if isinstance(stored, dict) and stored else {}
+        stations[station_id] = safe
         KIOSK_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         temp = KIOSK_CONFIG_PATH.with_suffix(KIOSK_CONFIG_PATH.suffix + ".tmp")
-        temp.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.write_text(json.dumps({"stations": stations}, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp, KIOSK_CONFIG_PATH)
 
 
+def smtp_profiles() -> list[dict]:
+    return [
+        {"key": "primary", "host": SMTP_HOST, "port": SMTP_PORT, "username": SMTP_USERNAME,
+         "password": SMTP_PASSWORD, "from": SMTP_FROM, "use_tls": SMTP_USE_TLS,
+         "daily_limit": SMTP_PRIMARY_DAILY_LIMIT},
+        {"key": "secondary", "host": SMTP_SECONDARY_HOST, "port": SMTP_SECONDARY_PORT,
+         "username": SMTP_SECONDARY_USERNAME, "password": SMTP_SECONDARY_PASSWORD,
+         "from": SMTP_SECONDARY_FROM, "use_tls": SMTP_SECONDARY_USE_TLS,
+         "daily_limit": SMTP_SECONDARY_DAILY_LIMIT},
+    ]
+
+
+def smtp_profile_configured(profile: dict) -> bool:
+    return bool(profile["host"] and 1 <= profile["port"] <= 65535 and profile["from"] and
+                (bool(profile["username"]) == bool(profile["password"])))
+
+
+def smtp_secondary_has_settings() -> bool:
+    return any((SMTP_SECONDARY_HOST, SMTP_SECONDARY_USERNAME, SMTP_SECONDARY_PASSWORD, SMTP_SECONDARY_FROM))
+
+
 def smtp_configured() -> bool:
-    return bool(SMTP_HOST and 1 <= SMTP_PORT <= 65535 and SMTP_FROM and (bool(SMTP_USERNAME) == bool(SMTP_PASSWORD)))
+    profiles = smtp_profiles()
+    if not smtp_profile_configured(profiles[0]):
+        return False
+    if smtp_secondary_has_settings():
+        return bool(smtp_profile_configured(profiles[1]) and SETTINGS_DATABASE_URL and
+                    SMTP_PRIMARY_DAILY_LIMIT > 0 and SMTP_SECONDARY_DAILY_LIMIT > 0)
+    return True
+
+
+def quota_day_key() -> date:
+    try:
+        return datetime.now(ZoneInfo(SMTP_QUOTA_TIMEZONE)).date()
+    except (ZoneInfoNotFoundError, ValueError):
+        return datetime.now(timezone.utc).date()
+
+
+def reserve_smtp_daily_slot(account_key: str, daily_limit: int) -> bool:
+    """Atomically reserve one app-originated send against an SMTP account's daily cap."""
+    if not SETTINGS_DATABASE_URL:
+        raise RuntimeError("PostgreSQL est requis pour répartir les envois entre les comptes SMTP.")
+    ensure_settings_schema()
+    try:
+        with settings_database_connect() as connection:
+            cursor = connection.execute("""INSERT INTO self_checkin_smtp_daily_usage(account_key, usage_day, attempts)
+                VALUES (%s, %s, 1)
+                ON CONFLICT(account_key, usage_day) DO UPDATE SET attempts=self_checkin_smtp_daily_usage.attempts + 1
+                WHERE self_checkin_smtp_daily_usage.attempts < %s
+                RETURNING attempts""", (account_key, quota_day_key(), daily_limit))
+            return cursor.fetchone() is not None
+    except Exception as exc:
+        raise RuntimeError("Impossible de vérifier le quota SMTP quotidien dans PostgreSQL.") from exc
 
 
 def render_mail_template(template: str, values: dict) -> str:
@@ -436,9 +547,10 @@ def delete_email_attachment(event_id: str, attachment_id: str) -> bool:
         raise RuntimeError("Impossible de supprimer la pièce jointe dans PostgreSQL.") from exc
 
 
-def build_email_message(to_address: str, subject: str, body: str, attachments: list[dict] | None = None) -> EmailMessage:
+def build_email_message(to_address: str, subject: str, body: str, attachments: list[dict] | None = None,
+                        from_address: str | None = None) -> EmailMessage:
     message = EmailMessage()
-    message["From"] = SMTP_FROM or "Imagine Events <noreply@example.com>"
+    message["From"] = from_address or SMTP_FROM or "Imagine Events <noreply@example.com>"
     message["To"] = to_address
     message["Subject"] = subject[:200]
     message.set_content(body[:10000])
@@ -450,24 +562,35 @@ def build_email_message(to_address: str, subject: str, body: str, attachments: l
     return message
 
 
+def transmit_email(profile: dict, message: EmailMessage) -> None:
+    context = ssl.create_default_context()
+    if profile["port"] == 465:
+        with smtplib.SMTP_SSL(profile["host"], profile["port"], timeout=20, context=context) as smtp:
+            if profile["username"]:
+                smtp.login(profile["username"], profile["password"])
+            smtp.send_message(message)
+        return
+    with smtplib.SMTP(profile["host"], profile["port"], timeout=20) as smtp:
+        if profile["use_tls"]:
+            smtp.starttls(context=context)
+        if profile["username"]:
+            smtp.login(profile["username"], profile["password"])
+        smtp.send_message(message)
+
+
 def send_email(to_address: str, subject: str, body: str, attachments: list[dict] | None = None) -> None:
     if not smtp_configured():
-        raise RuntimeError("Le serveur e-mail SMTP n’est pas configuré.")
-    message = build_email_message(to_address, subject, body, attachments)
-    context = ssl.create_default_context()
+        raise RuntimeError("Le serveur e-mail SMTP n’est pas configuré ou ses deux comptes sont incomplets.")
+    profiles = [profile for profile in smtp_profiles() if smtp_profile_configured(profile)]
+    profile = profiles[0]
+    if len(profiles) > 1:
+        profile = next((candidate for candidate in profiles
+                        if reserve_smtp_daily_slot(candidate["key"], candidate["daily_limit"])), None)
+        if profile is None:
+            raise RuntimeError("Les quotas quotidiens des deux comptes SMTP sont atteints; l’e-mail sera retenté après leur renouvellement.")
+    message = build_email_message(to_address, subject, body, attachments, profile["from"])
     try:
-        if SMTP_PORT == 465:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=20, context=context) as smtp:
-                if SMTP_USERNAME:
-                    smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-                smtp.send_message(message)
-            return
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as smtp:
-            if SMTP_USE_TLS:
-                smtp.starttls(context=context)
-            if SMTP_USERNAME:
-                smtp.login(SMTP_USERNAME, SMTP_PASSWORD)
-            smtp.send_message(message)
+        transmit_email(profile, message)
     except (OSError, smtplib.SMTPException) as exc:
         raise RuntimeError("Impossible d’envoyer l’e-mail. Vérifiez les paramètres SMTP et l’adresse de l’expéditeur.") from exc
 
@@ -520,9 +643,28 @@ def payment_email_eligible(person: dict, settings: dict) -> bool:
     return bool(settings.get("paymentEmailEnabled") and enabled_at and confirmed_at and confirmed_at >= enabled_at)
 
 
-def poll_payment_emails_once() -> None:
-    settings = kiosk_settings()
-    event_id = settings.get("eventId") or EVENT_ID
+def kiosk_station_ids() -> list[str]:
+    station_ids = {"default"}
+    if SETTINGS_DATABASE_URL:
+        ensure_settings_schema()
+        with settings_database_connect() as connection:
+            rows = connection.execute("SELECT station_id FROM self_checkin_station_settings").fetchall()
+        station_ids.update(row[0] for row in rows if valid_station_id(row[0]))
+    else:
+        with settings_lock:
+            try:
+                stored = json.loads(KIOSK_CONFIG_PATH.read_text(encoding="utf-8"))
+                stations = stored.get("stations") if isinstance(stored, dict) else None
+                if isinstance(stations, dict):
+                    station_ids.update(key for key in stations if key == "default" or valid_station_id(key))
+            except (OSError, ValueError):
+                pass
+    return sorted(station_ids)
+
+
+def poll_payment_emails_once(station_id: str | None = None) -> None:
+    settings = kiosk_settings(station_id)
+    event_id = settings.get("eventId") or (EVENT_ID if (station_id or "default") == "default" else "")
     if not event_id or not settings.get("paymentEmailEnabled") or not smtp_configured() or not SETTINGS_DATABASE_URL:
         return
     if not parse_timestamp(settings.get("paymentEmailEnabledAt", "")):
@@ -554,7 +696,11 @@ def poll_payment_emails_once() -> None:
 def payment_email_worker() -> None:
     while True:
         try:
-            poll_payment_emails_once()
+            for station_id in kiosk_station_ids():
+                try:
+                    poll_payment_emails_once(station_id)
+                except Exception:
+                    print("Payment confirmation email polling failed.", flush=True)
         except Exception:
             print("Payment confirmation email polling failed.", flush=True)
         time.sleep(30)
@@ -604,7 +750,7 @@ def event_info() -> dict:
     missing = required_config()
     event_id = selected_event_id()
     if not event_id:
-        missing = missing + ["IMAGINE_DESK_EVENT_ID"]
+        missing = missing + ["eventId"]
     if missing:
         return {"ready": False, "event": None, "missing": missing, "settings": public_settings(settings), "registrationsEnabled": settings["registrationsEnabled"]}
     data = client.call("/api/events")
@@ -717,7 +863,17 @@ class Handler(BaseHTTPRequestHandler):
             q.append(now)
             return False
 
+    def set_station_context(self) -> bool:
+        station_id = self.headers.get("X-Kiosk-Station", "default").strip() or "default"
+        if station_id != "default" and not valid_station_id(station_id):
+            return False
+        request_context.station_id = station_id
+        return True
+
     def do_GET(self):
+        if not self.set_station_context():
+            self.json_response(400, {"error": "Identifiant de borne invalide."})
+            return
         if self.path == "/api/health":
             try:
                 if SETTINGS_DATABASE_URL:
@@ -794,14 +950,35 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(503, {"ready": False, "event": None, "message": str(exc)})
             return
         path = self.path.split("?", 1)[0]
-        if path in ("/", "/index.html", "/app.js", "/styles.css", "/icon.svg", "/logo.png", "/admin", "/admin.html", "/admin.js", "/admin.css", "/manifest.webmanifest"):
-            filename = "index.html" if path in ("/", "/index.html") else ("admin.html" if path == "/admin" else path.lstrip("/"))
+        kiosk_path_match = re.fullmatch(r"/([A-Za-z0-9_-]{1,32})", path)
+        admin_path_match = re.fullmatch(r"/admin/([A-Za-z0-9_-]{1,32})", path)
+        static_paths = ("/", "/index.html", "/app.js", "/styles.css", "/icon.svg", "/logo.png", "/admin", "/admin.html", "/admin.js", "/admin.css", "/manifest.webmanifest")
+        if path in static_paths or kiosk_path_match or admin_path_match:
+            if kiosk_path_match or path in ("/", "/index.html"):
+                filename = "index.html"
+            elif admin_path_match or path == "/admin":
+                filename = "admin.html"
+            else:
+                filename = path.lstrip("/")
             file = (PUBLIC / filename).resolve()
             if not file.is_relative_to(PUBLIC.resolve()) or not file.is_file():
                 self.send_error(404)
                 return
             types = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".webmanifest": "application/manifest+json; charset=utf-8", ".png": "image/png"}
             raw = file.read_bytes()
+            if filename == "index.html" and kiosk_path_match:
+                station_id = kiosk_path_match.group(1)
+                manifest_url = f'/manifest.webmanifest?station={quote(station_id, safe="")}'
+                raw = raw.replace(b'href="/manifest.webmanifest"', f'href="{manifest_url}"'.encode())
+            elif filename == "manifest.webmanifest":
+                station_id = parse_qs(urlsplit(self.path).query).get("station", ["default"])[0]
+                if station_id != "default" and valid_station_id(station_id):
+                    manifest = json.loads(raw.decode("utf-8"))
+                    manifest["start_url"] = f"/{station_id}"
+                    manifest["id"] = f"/{station_id}"
+                    manifest["name"] = f"{manifest.get('name', 'Imagine Accueil')} · {station_id}"
+                    manifest["short_name"] = f"Borne {station_id}"
+                    raw = json.dumps(manifest, ensure_ascii=False).encode("utf-8")
             self.send_response(200)
             self.security_headers(types.get(file.suffix, "application/octet-stream"))
             self.send_header("Content-Length", str(len(raw)))
@@ -811,6 +988,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
+        if not self.set_station_context():
+            self.json_response(400, {"error": "Identifiant de borne invalide."})
+            return
         if not self.path.startswith("/api/"):
             self.send_error(404)
             return
@@ -941,7 +1121,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not recipient or "@" not in recipient:
                     raise ValueError("Saisissez une adresse e-mail de test valide.")
                 settings = kiosk_settings()
-                event_id = settings.get("eventId") or EVENT_ID
+                event_id = selected_event_id()
                 event_data = admin.call("/api/events")
                 event = next((item for item in event_data.get("events", []) if str(item.get("id")) == str(event_id)), {})
                 variables = {"name": "Participant de test", "price": "150 TND", "amount": "150", "currency": "TND",
@@ -957,7 +1137,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             missing = required_config()
             if not selected_event_id():
-                missing.append("IMAGINE_DESK_EVENT_ID")
+                missing.append("eventId")
             if missing:
                 self.json_response(503, {"error": "La borne n’est pas encore reliée à Imagine Desk. Connectez-vous à /admin pour la configurer."})
                 return
@@ -980,9 +1160,9 @@ class Handler(BaseHTTPRequestHandler):
                 with lookup_lock:
                     now = time.monotonic()
                     for key, value in list(lookup_tokens.items()):
-                        if value[2] < now:
+                        if value[3] < now:
                             lookup_tokens.pop(key, None)
-                    lookup_tokens[token] = (str(person.get("id")), self.client_address[0], now + 180)
+                    lookup_tokens[token] = (str(person.get("id")), self.client_address[0], current_station_id(), now + 180)
                 settings = kiosk_settings()
                 payment_status = person.get("paymentStatus") or "unpaid"
                 already_key = {"paid": "alreadyPaidMessage", "exempt": "alreadyExemptMessage"}.get(payment_status, "alreadyUnpaidMessage")
@@ -998,7 +1178,8 @@ class Handler(BaseHTTPRequestHandler):
                 token = clean(body.get("lookupToken"), 100)
                 with lookup_lock:
                     token_data = lookup_tokens.pop(token, None) if token else None
-                if not token_data or token_data[1] != self.client_address[0] or token_data[2] < time.monotonic():
+                if (not token_data or token_data[1] != self.client_address[0] or
+                        token_data[2] != current_station_id() or token_data[3] < time.monotonic()):
                     raise ValueError("Votre recherche a expiré. Recommencez la recherche.")
                 person_id = token_data[0]
                 # Re-fetch and validate the attendee on the server; don't trust a client-supplied ID alone.

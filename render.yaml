@@ -31,6 +31,24 @@ services:
         sync: false
       - key: SMTP_USE_TLS
         value: "1"
+      - key: SMTP_SECONDARY_HOST
+        sync: false
+      - key: SMTP_SECONDARY_PORT
+        value: "587"
+      - key: SMTP_SECONDARY_USERNAME
+        sync: false
+      - key: SMTP_SECONDARY_PASSWORD
+        sync: false
+      - key: SMTP_SECONDARY_FROM
+        sync: false
+      - key: SMTP_SECONDARY_USE_TLS
+        value: "1"
+      - key: SMTP_PRIMARY_DAILY_LIMIT
+        value: "300"
+      - key: SMTP_SECONDARY_DAILY_LIMIT
+        value: "300"
+      - key: SMTP_QUOTA_TIMEZONE
+        value: Africa/Tunis
 
 databases:
   - name: imagine-self-check-in-db

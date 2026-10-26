@@ -9,6 +9,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 import server
 
@@ -77,6 +78,11 @@ class KioskApiTests(unittest.TestCase):
             response = exc
         return response.code, json.loads(response.read())
 
+    def get_json(self, path, headers=None):
+        request = Request(self.base + path, headers=headers or {})
+        with urlopen(request) as response:
+            return response.code, json.loads(response.read())
+
     def test_event_config_is_limited_to_selected_event(self):
         with urlopen(self.base + "/api/config") as response:
             data = json.loads(response.read())
@@ -117,6 +123,36 @@ class KioskApiTests(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertIn("déjà inscrite", duplicate["error"])
 
+
+    def test_station_links_keep_independent_event_settings(self):
+        old_path = server.KIOSK_CONFIG_PATH
+        old_station = getattr(server.request_context, "station_id", "default")
+        self.addCleanup(setattr, server, "KIOSK_CONFIG_PATH", old_path)
+        self.addCleanup(setattr, server.request_context, "station_id", old_station)
+        with tempfile.TemporaryDirectory() as tempdir:
+            server.KIOSK_CONFIG_PATH = Path(tempdir) / "settings.json"
+            server.save_kiosk_settings({"eventId": "event-1", "registrationsEnabled": False}, station_id="1")
+            server.save_kiosk_settings({"eventId": "", "registrationsEnabled": True}, station_id="2")
+            self.assertEqual(server.kiosk_settings("1")["eventId"], "event-1")
+            self.assertFalse(server.kiosk_settings("1")["registrationsEnabled"])
+            self.assertEqual(server.kiosk_settings("2")["eventId"], "")
+            self.assertTrue(server.kiosk_settings("2")["registrationsEnabled"])
+
+            status, first = self.get_json("/api/config", {"X-Kiosk-Station": "1"})
+            self.assertEqual(status, 200)
+            self.assertTrue(first["ready"])
+            self.assertFalse(first["registrationsEnabled"])
+            status, second = self.get_json("/api/config", {"X-Kiosk-Station": "2"})
+            self.assertEqual(status, 200)
+            self.assertFalse(second["ready"])
+            self.assertTrue(second["registrationsEnabled"])
+
+            with urlopen(self.base + "/1") as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn(b"manifest.webmanifest?station=1", response.read())
+            with urlopen(self.base + "/admin/1") as response:
+                self.assertEqual(response.status, 200)
+                self.assertIn(b"Administration de la borne", response.read())
 
     def test_admin_can_update_event_and_kiosk_settings(self):
         old_path = server.KIOSK_CONFIG_PATH
@@ -239,6 +275,37 @@ class KioskApiTests(unittest.TestCase):
         self.assertEqual(attachment.get_filename(), "programme.pdf")
         self.assertEqual(attachment.get_content_type(), "application/pdf")
         self.assertEqual(attachment.get_payload(decode=True), content)
+
+    def test_smtp_switches_to_secondary_when_primary_daily_cap_is_full(self):
+        primary = {"key": "primary", "host": "smtp.primary.test", "port": 587, "username": "primary-user",
+                   "password": "primary-secret", "from": "Imagine <mail@imagine.test>", "use_tls": True, "daily_limit": 300}
+        secondary = {"key": "secondary", "host": "smtp.secondary.test", "port": 587, "username": "secondary-user",
+                     "password": "secondary-secret", "from": "Imagine Events <mail@events.test>", "use_tls": True, "daily_limit": 300}
+        with (
+            patch.object(server, "smtp_configured", return_value=True),
+            patch.object(server, "smtp_profiles", return_value=[primary, secondary]),
+            patch.object(server, "reserve_smtp_daily_slot", side_effect=[False, True]),
+            patch.object(server, "transmit_email") as transmit,
+        ):
+            server.send_email("participant@example.test", "Test", "Body")
+        selected_profile, message = transmit.call_args.args
+        self.assertEqual(selected_profile["key"], "secondary")
+        self.assertEqual(message["From"], secondary["from"])
+
+    def test_smtp_does_not_send_when_both_daily_caps_are_full(self):
+        primary = {"key": "primary", "host": "smtp.primary.test", "port": 587, "username": "primary-user",
+                   "password": "primary-secret", "from": "Imagine <mail@imagine.test>", "use_tls": True, "daily_limit": 300}
+        secondary = {"key": "secondary", "host": "smtp.secondary.test", "port": 587, "username": "secondary-user",
+                     "password": "secondary-secret", "from": "Imagine Events <mail@events.test>", "use_tls": True, "daily_limit": 300}
+        with (
+            patch.object(server, "smtp_configured", return_value=True),
+            patch.object(server, "smtp_profiles", return_value=[primary, secondary]),
+            patch.object(server, "reserve_smtp_daily_slot", return_value=False),
+            patch.object(server, "transmit_email") as transmit,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "quotas quotidiens"):
+                server.send_email("participant@example.test", "Test", "Body")
+        transmit.assert_not_called()
 
     def test_payment_email_only_follows_a_new_agent_confirmed_payment(self):
         settings = {"paymentEmailEnabled": True, "paymentEmailEnabledAt": "2026-10-25T10:00:00+00:00"}

@@ -1,10 +1,12 @@
 const $=s=>document.querySelector(s);
+const adminStationMatch=window.location.pathname.match(/^\/admin\/([A-Za-z0-9_-]{1,32})\/?$/);
+const stationId=adminStationMatch?adminStationMatch[1]:'default';
 let events=[];
 let settings={};
 let smtpReady=false;
 let toastTimer;
 async function api(path,options={}){
-  const headers={...(options.headers||{})};
+  const headers={...(options.headers||{}),'X-Kiosk-Station':stationId};
   const isFormData=typeof FormData!=='undefined'&&options.body instanceof FormData;
   if(options.body&&!headers['Content-Type']&&!isFormData)headers['Content-Type']='application/json';
   let response,data;
@@ -121,4 +123,11 @@ $('#test-email-button').addEventListener('click',async()=>{
   finally{setBusy(button,false);}
 });
 $('#logout-button').addEventListener('click',async()=>{try{await api('/api/admin/logout',{method:'POST',body:JSON.stringify({})});}catch(e){}showLogin();showToast('Vous êtes déconnecté·e.');});
+if(stationId!=='default'){
+  $('#station-admin-title').textContent=`Réglages de la borne ${stationId}`;
+  document.title=`Administration borne ${stationId} · Imagine Self Check-in`;
+  document.querySelectorAll('a[href="/"]').forEach(link=>{link.href=`/${encodeURIComponent(stationId)}`;});
+  $('#station-link-hint').hidden=false;
+  $('#station-link-hint').textContent=`Lien de cette borne : /${stationId} · Réglages : /admin/${stationId}`;
+}
 startAdmin();
