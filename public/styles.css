@@ -18,3 +18,69 @@ html[dir=rtl] .topbar,html[dir=rtl] .event-head,html[dir=rtl] .topbar-right{dire
 
 /* Keep the staff-call action visible while kiosk screens change or scroll. */
 .app-shell{padding-bottom:82px}html[dir=rtl] .help-call-button{right:auto;left:max(18px,calc((100vw - 900px)/2))}@media(max-width:700px){.app-shell{padding-bottom:78px}html[dir=rtl] .help-call-button{left:14px;right:auto}}
+
+/* Desktop kiosks use more of the available screen and scale tap targets up. */
+@media(min-width:1100px){
+  .topbar{max-width:1500px;height:96px;padding-left:48px;padding-right:48px}
+  .app-shell{width:min(calc(100% - 96px),1320px);margin:28px auto 0}
+  .help-call-button{right:max(48px,calc((100vw - 1320px)/2))}
+  .event-head{min-height:148px;padding:30px 40px;border-radius:19px}
+  .event-orb{width:76px;height:76px;flex-basis:76px;margin-right:28px;border-radius:18px}
+  .event-orb svg{width:43px;height:43px}
+  .event-meta h1{font-size:28px;letter-spacing:-.6px}
+  .event-details{font-size:15px}
+  .event-spark{right:40px;top:39px;font-size:24px}
+  .screen-home{min-height:calc(100vh - 500px);display:flex;flex-direction:column;justify-content:center;padding:44px 24px 18px}
+  .welcome-copy{margin-bottom:42px}
+  .welcome-copy h2{font-size:clamp(36px,3vw,50px);letter-spacing:-1.5px;margin:13px 0 12px}
+  .welcome-copy p{font-size:18px}
+  .choice-grid{gap:28px}
+  .choice-card{min-height:250px;padding:34px 36px;border-radius:19px}
+  .choice-icon{width:68px;height:68px;flex-basis:68px;margin-right:23px;border-radius:17px}
+  .choice-icon svg{width:39px;height:39px}
+  .choice-text{padding-top:4px;padding-right:32px}
+  .choice-kicker{font-size:12px;margin-bottom:14px}
+  .choice-text strong{font-size:clamp(22px,1.8vw,28px);letter-spacing:-.6px}
+  .choice-text small{font-size:16px;line-height:1.55;margin-top:11px}
+  .choice-arrow{right:26px;bottom:24px;font-size:24px}
+  .privacy-note{font-size:13px;margin-top:32px;gap:11px}
+  .form-screen{width:min(100%,820px);padding:34px 14px 22px}
+  .back-button{font-size:15px;padding:12px 7px}
+  .step-heading{margin:30px 0 28px}
+  .step-pill{font-size:11px}
+  .step-heading h2{font-size:38px;margin:14px 0 10px}
+  .step-heading p{font-size:17px;max-width:720px}
+  .kiosk-form{padding:34px 38px 36px;border-radius:17px}
+  .kiosk-form>label,.field label{font-size:15px;margin-bottom:11px}
+  .kiosk-form input:not([type=checkbox]){height:64px;font-size:18px;border-radius:11px}
+  .input-wrap input{padding-left:64px}
+  .input-wrap .input-icon{left:19px;width:24px;height:24px}
+  .input-icon svg{width:24px;height:24px}
+  .field-grid{gap:24px}
+  .field{margin-bottom:19px}
+  .primary-button{height:68px;font-size:17px;border-radius:11px}
+  .kiosk-form .primary-button{margin-top:25px}
+  .help-hint{font-size:13px;margin-top:21px}
+  .identity-card{padding:22px 25px;margin:30px 0 20px}
+  .identity-avatar{width:58px;height:58px;flex-basis:58px;font-size:16px}
+  .identity-card small,.badge-code-card small{font-size:11px}
+  .identity-card strong{font-size:20px}
+  .badge-code-card{width:min(100%,440px);padding:22px;margin-top:30px}
+  .badge-code-card strong{font-size:29px}
+  .badge-code-card p{font-size:12px}
+  .confirm-screen>.primary-button{margin-top:24px}
+  .done-screen{padding:58px 24px 40px}
+  .success-mark{width:88px;height:88px;margin-bottom:26px}
+  .done-screen h2{font-size:42px;margin:15px 0 12px}
+  .done-screen>p{font-size:17px;max-width:560px}
+  .secondary-button{min-height:58px;margin-top:32px;padding:0 25px;font-size:14px}
+  .page-footer{height:64px;font-size:12px;margin-top:29px}
+}
+@media(min-width:1600px){
+  .app-shell{width:min(calc(100% - 120px),1440px)}
+  .help-call-button{right:max(60px,calc((100vw - 1440px)/2))}
+  .screen-home{min-height:calc(100vh - 480px)}
+  .choice-card{min-height:280px;padding:40px 44px}
+  .choice-icon{width:76px;height:76px;flex-basis:76px}
+  .choice-icon svg{width:44px;height:44px}
+}
