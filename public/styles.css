@@ -13,3 +13,4 @@ html[dir=rtl] .topbar,html[dir=rtl] .event-head,html[dir=rtl] .topbar-right{dire
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important}}
 
 .payment-required-note{display:flex;align-items:flex-start;gap:10px;color:#714b08;white-space:pre-line;background:#fff7e5;border:1px solid #f1dca8;border-radius:9px;padding:14px;font-size:13px;font-weight:600;line-height:1.5}.payment-required-note>span:first-child{display:grid;place-items:center;flex:0 0 19px;width:19px;height:19px;border-radius:50%;background:#f5d98e;color:#714b08;font-size:13px;font-weight:800}.payment-required-note[hidden]{display:none}
+.lookup-code-card{margin:0 auto 16px}

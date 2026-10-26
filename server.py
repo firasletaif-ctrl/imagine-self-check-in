@@ -1010,7 +1010,8 @@ class Handler(BaseHTTPRequestHandler):
                 payment_status = person.get("paymentStatus") or "unpaid"
                 if person.get("checkedIn"):
                     message_key = {"paid": "alreadyPaidMessage", "exempt": "alreadyExemptMessage"}.get(payment_status, "alreadyUnpaidMessage")
-                    self.json_response(200, {"ok": True, "already": True, "name": clean(person.get("name"), 180), "message": settings[message_key]})
+                    self.json_response(200, {"ok": True, "already": True, "name": clean(person.get("name"), 180),
+                                         "code": clean(person.get("code"), 40), "message": settings[message_key]})
                     return
                 op = {"opId": "kiosk-" + uuid.uuid4().hex, "action": "checkin", "participantId": person_id}
                 sync_path = f"/api/events/{quote(event_id, safe='')}/sync"
@@ -1018,7 +1019,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not result.get("results") or not result["results"][0].get("ok"):
                     raise RuntimeError("Le check-in n’a pas pu être confirmé. Demandez de l’aide à l’accueil.")
                 message_key = {"paid": "arrivedPaidMessage", "exempt": "arrivedExemptMessage"}.get(payment_status, "arrivedUnpaidMessage")
-                self.json_response(200, {"ok": True, "already": False, "name": clean(person.get("name"), 180), "message": settings[message_key]})
+                self.json_response(200, {"ok": True, "already": False, "name": clean(person.get("name"), 180),
+                                         "code": clean(person.get("code"), 40), "message": settings[message_key]})
                 return
             if self.path == "/api/register":
                 settings = kiosk_settings()
