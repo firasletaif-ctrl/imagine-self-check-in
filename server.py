@@ -159,6 +159,8 @@ def valid_station_id(value: str) -> bool:
 def current_station_id() -> str:
     return getattr(request_context, "station_id", "default")
 admin_sessions_lock = threading.RLock()
+help_requests_memory: list[dict] = []
+help_requests_lock = threading.RLock()
 
 
 def settings_database_connect():
@@ -255,6 +257,17 @@ def ensure_settings_schema() -> None:
                     attempts INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(account_key, usage_day)
                 )""")
+                connection.execute("""CREATE TABLE IF NOT EXISTS self_checkin_help_requests (
+                    id TEXT PRIMARY KEY,
+                    station_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    acknowledged_at TIMESTAMPTZ,
+                    resolved_at TIMESTAMPTZ,
+                    handled_by TEXT NOT NULL DEFAULT ''
+                )""")
+                connection.execute("""CREATE UNIQUE INDEX IF NOT EXISTS self_checkin_help_one_active_per_station
+                    ON self_checkin_help_requests(station_id) WHERE status IN ('pending','acknowledged')""")
             settings_schema_ready = True
         except Exception as exc:
             raise RuntimeError("Impossible de joindre PostgreSQL pour les réglages de la borne.") from exc
@@ -429,6 +442,101 @@ def reserve_smtp_daily_slot(account_key: str, daily_limit: int) -> bool:
             return cursor.fetchone() is not None
     except Exception as exc:
         raise RuntimeError("Impossible de vérifier le quota SMTP quotidien dans PostgreSQL.") from exc
+
+
+def help_station_label(station_id: str) -> str:
+    return "Borne principale" if station_id == "default" else f"Borne {station_id}"
+
+
+def serialize_help_request(request_id: str, station_id: str, status: str, created_at, acknowledged_at=None,
+                           handled_by: str = "") -> dict:
+    return {"id": request_id, "stationId": station_id, "stationLabel": help_station_label(station_id),
+            "status": status, "createdAt": created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
+            "acknowledgedAt": acknowledged_at.isoformat() if hasattr(acknowledged_at, "isoformat") else acknowledged_at,
+            "handledBy": handled_by}
+
+
+def create_help_request(station_id: str | None = None) -> tuple[dict, bool]:
+    station_id = station_id or current_station_id()
+    if station_id != "default" and not valid_station_id(station_id):
+        raise ValueError("Identifiant de borne invalide.")
+    if SETTINGS_DATABASE_URL:
+        ensure_settings_schema()
+        try:
+            with settings_database_connect() as connection:
+                active = connection.execute("""SELECT id, station_id, status, created_at, acknowledged_at, handled_by
+                    FROM self_checkin_help_requests WHERE station_id=%s AND status IN ('pending','acknowledged')
+                    ORDER BY created_at LIMIT 1""", (station_id,)).fetchone()
+                if active:
+                    return serialize_help_request(*active), False
+                request_id = uuid.uuid4().hex
+                row = connection.execute("""INSERT INTO self_checkin_help_requests(id,station_id,status)
+                    VALUES(%s,%s,'pending')
+                    ON CONFLICT(station_id) WHERE status IN ('pending','acknowledged') DO NOTHING
+                    RETURNING id,station_id,status,created_at,acknowledged_at,handled_by""",
+                    (request_id, station_id)).fetchone()
+                if not row:
+                    active = connection.execute("""SELECT id, station_id, status, created_at, acknowledged_at, handled_by
+                        FROM self_checkin_help_requests WHERE station_id=%s AND status IN ('pending','acknowledged')
+                        ORDER BY created_at LIMIT 1""", (station_id,)).fetchone()
+                    return serialize_help_request(*active), False
+            return serialize_help_request(*row), True
+        except Exception as exc:
+            raise RuntimeError("Impossible d’envoyer l’appel au personnel. Réessayez.") from exc
+    with help_requests_lock:
+        active = next((item for item in help_requests_memory if item["stationId"] == station_id and
+                       item["status"] in ("pending", "acknowledged")), None)
+        if active:
+            return dict(active), False
+        request = serialize_help_request(uuid.uuid4().hex, station_id, "pending", utc_now())
+        help_requests_memory.append(request)
+        return dict(request), True
+
+
+def list_help_requests() -> list[dict]:
+    if SETTINGS_DATABASE_URL:
+        ensure_settings_schema()
+        try:
+            with settings_database_connect() as connection:
+                rows = connection.execute("""SELECT id,station_id,status,created_at,acknowledged_at,handled_by
+                    FROM self_checkin_help_requests WHERE status IN ('pending','acknowledged')
+                    ORDER BY created_at ASC""").fetchall()
+            return [serialize_help_request(*row) for row in rows]
+        except Exception as exc:
+            raise RuntimeError("Impossible de charger les appels au personnel.") from exc
+    with help_requests_lock:
+        return [dict(request) for request in help_requests_memory
+                if request["status"] in ("pending", "acknowledged")]
+
+
+def update_help_request(request_id: str, status: str, handled_by: str = "") -> dict | None:
+    if status not in {"acknowledged", "resolved"}:
+        raise ValueError("État d’appel invalide.")
+    if SETTINGS_DATABASE_URL:
+        ensure_settings_schema()
+        try:
+            with settings_database_connect() as connection:
+                row = connection.execute("""UPDATE self_checkin_help_requests SET
+                    status=%s,
+                    acknowledged_at=CASE WHEN %s='acknowledged' THEN COALESCE(acknowledged_at,CURRENT_TIMESTAMP) ELSE acknowledged_at END,
+                    resolved_at=CASE WHEN %s='resolved' THEN CURRENT_TIMESTAMP ELSE resolved_at END,
+                    handled_by=%s
+                    WHERE id=%s AND status IN ('pending','acknowledged')
+                    RETURNING id,station_id,status,created_at,acknowledged_at,handled_by""",
+                    (status, status, status, clean(handled_by, 80), request_id)).fetchone()
+            return serialize_help_request(*row) if row else None
+        except Exception as exc:
+            raise RuntimeError("Impossible de mettre à jour cet appel au personnel.") from exc
+    with help_requests_lock:
+        request = next((item for item in help_requests_memory if item["id"] == request_id and
+                        item["status"] in ("pending", "acknowledged")), None)
+        if not request:
+            return None
+        request["status"] = status
+        request["handledBy"] = clean(handled_by, 80)
+        if status == "acknowledged" and not request.get("acknowledgedAt"):
+            request["acknowledgedAt"] = utc_now()
+        return dict(request)
 
 
 def render_mail_template(template: str, values: dict) -> str:
@@ -943,6 +1051,16 @@ class Handler(BaseHTTPRequestHandler):
             except RuntimeError as exc:
                 self.json_response(502, {"error": str(exc)})
             return
+        if self.path == "/api/help-requests":
+            admin = admin_client_for(self)
+            if not admin:
+                self.json_response(401, {"error": "Connectez-vous pour afficher les appels au personnel."})
+                return
+            try:
+                self.json_response(200, {"requests": list_help_requests()})
+            except RuntimeError as exc:
+                self.json_response(503, {"error": str(exc)})
+            return
         if self.path == "/api/config":
             try:
                 self.json_response(200, event_info())
@@ -950,14 +1068,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(503, {"ready": False, "event": None, "message": str(exc)})
             return
         path = self.path.split("?", 1)[0]
-        kiosk_path_match = re.fullmatch(r"/([A-Za-z0-9_-]{1,32})", path)
+        static_paths = ("/", "/index.html", "/app.js", "/styles.css", "/icon.svg", "/logo.png", "/admin", "/admin.html", "/admin.js", "/admin.css", "/help", "/help.html", "/help.js", "/help.css", "/manifest.webmanifest")
+        kiosk_path_match = re.fullmatch(r"/([A-Za-z0-9_-]{1,32})", path) if path not in static_paths and path != "/api" else None
         admin_path_match = re.fullmatch(r"/admin/([A-Za-z0-9_-]{1,32})", path)
-        static_paths = ("/", "/index.html", "/app.js", "/styles.css", "/icon.svg", "/logo.png", "/admin", "/admin.html", "/admin.js", "/admin.css", "/manifest.webmanifest")
         if path in static_paths or kiosk_path_match or admin_path_match:
             if kiosk_path_match or path in ("/", "/index.html"):
                 filename = "index.html"
             elif admin_path_match or path == "/admin":
                 filename = "admin.html"
+            elif path == "/help":
+                filename = "help.html"
             else:
                 filename = path.lstrip("/")
             file = (PUBLIC / filename).resolve()
@@ -1013,6 +1133,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.json_response(201, {"ok": True, "attachment": attachment})
                 return
             body = self.read_body()
+            if self.path == "/api/help":
+                request, created = create_help_request(current_station_id())
+                self.json_response(201 if created else 200, {"ok": True, "created": created, "request": request})
+                return
+            help_update_match = re.fullmatch(r"/api/help-requests/([a-f0-9]{32})", self.path)
+            if help_update_match:
+                admin = admin_client_for(self)
+                if not admin:
+                    self.json_response(401, {"error": "Connectez-vous pour gérer les appels au personnel."})
+                    return
+                status = clean(body.get("status"), 20)
+                updated = update_help_request(help_update_match.group(1), status, clean(admin.user.get("username"), 80))
+                if not updated:
+                    self.json_response(404, {"error": "Cet appel est déjà terminé ou introuvable."})
+                    return
+                self.json_response(200, {"ok": True, "request": updated})
+                return
             if self.path == "/api/admin/login":
                 if not DESK_URL:
                     self.json_response(503, {"error": "Configurez d’abord l’URL d’Imagine Desk sur le serveur."})
