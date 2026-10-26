@@ -91,10 +91,21 @@ class KioskApiTests(unittest.TestCase):
         status, checked = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
         self.assertEqual(status, 200)
         self.assertFalse(checked["already"])
+        self.assertEqual(checked["code"], "IE-0001")
         self.assertTrue(self.desk.people[0]["checkedIn"])
         status, reused = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
         self.assertEqual(status, 400)
         self.assertIn("expiré", reused["error"])
+
+    def test_already_arrived_participant_still_gets_their_code(self):
+        self.desk.people[0]["checkedIn"] = True
+        status, lookup = self.post("/api/lookup", {"query": "amira@example.tn"})
+        self.assertEqual(status, 200)
+        self.assertEqual(lookup["code"], "IE-0001")
+        status, result = self.post("/api/checkin", {"lookupToken": lookup["lookupToken"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(result["already"])
+        self.assertEqual(result["code"], "IE-0001")
 
     def test_registration_creates_participant_and_prevents_duplicate_email(self):
         payload = {"name": "Mehdi Trabelsi", "email": "mehdi@example.tn", "company": "Demo", "consent": True}
